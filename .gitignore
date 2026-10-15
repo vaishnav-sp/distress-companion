@@ -37,4 +37,5 @@ tmp/
 
 # Generated model artifacts (review individually before committing)
 # models/
-# Uncomment the line above only if you intentionally want to exclude all models.
+# Uncomment the line above only if you intentionally want to exclude all models.# Local training dataset
+data/raw/autism_emotion_dataset/
