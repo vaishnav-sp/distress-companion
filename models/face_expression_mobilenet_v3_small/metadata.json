@@ -1,0 +1,81 @@
+{
+  "format_version": 1,
+  "architecture": "mobilenet_v3_small",
+  "class_names": [
+    "anger",
+    "fear",
+    "joy",
+    "Natural",
+    "sadness",
+    "surprise"
+  ],
+  "class_to_index": {
+    "anger": 0,
+    "fear": 1,
+    "joy": 2,
+    "Natural": 3,
+    "sadness": 4,
+    "surprise": 5
+  },
+  "display_label_mapping": {
+    "Natural": "neutral",
+    "joy": "happy",
+    "sadness": "sad",
+    "anger": "angry",
+    "fear": "fear",
+    "surprise": "surprise"
+  },
+  "preprocessing": {
+    "input_color": "RGB",
+    "resize_shorter_side": 256,
+    "center_crop": [
+      224,
+      224
+    ],
+    "interpolation": "bilinear",
+    "scale": "uint8 [0, 255] to float [0.0, 1.0]",
+    "mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "std": [
+      0.229,
+      0.224,
+      0.225
+    ],
+    "training_augmentation": [
+      "RandomResizedCrop(224, bilinear)",
+      "RandomHorizontalFlip(p=0.5)"
+    ],
+    "source": "Torchvision MobileNet_V3_Small_Weights.IMAGENET1K_V1.transforms()"
+  },
+  "pretrained_weight_source": "https://download.pytorch.org/models/mobilenet_v3_small-047dcff4.pth",
+  "pretrained_weight_enum": "MobileNet_V3_Small_Weights.IMAGENET1K_V1",
+  "backbone_frozen": true,
+  "trained_parameters": "classification head only",
+  "device": "cuda",
+  "seed": 42,
+  "training_config": {
+    "epochs": 12,
+    "batch_size": 32,
+    "learning_rate": 0.001,
+    "validation_fraction": 0.2
+  },
+  "dataset": {
+    "configured_root": "D:\\PROJECTS\\Distress_detection\\distress-companion\\data\\raw\\autism_emotion_dataset",
+    "actual_train_dir": "D:\\PROJECTS\\Distress_detection\\distress-companion\\data\\raw\\autism_emotion_dataset\\Autism emotion recogition dataset\\train",
+    "actual_test_dir": "D:\\PROJECTS\\Distress_detection\\distress-companion\\data\\raw\\autism_emotion_dataset\\Autism emotion recogition dataset\\test",
+    "train_image_count": 1199,
+    "train_subset_count": 959,
+    "validation_count": 240,
+    "test_image_count": 226,
+    "training_duplicate_audit": {
+      "exact_duplicate_groups": 45,
+      "extra_exact_duplicate_files": 45,
+      "cross_label_exact_duplicate_groups": 12
+    },
+    "validation_split_method": "seeded group holdout; exact-pixel duplicates and 64-bit dHash pairs with Hamming distance <= 4 are assigned to the same group"
+  },
+  "test_metrics_independent": false
+}

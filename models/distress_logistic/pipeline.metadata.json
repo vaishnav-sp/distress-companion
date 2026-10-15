@@ -1,0 +1,63 @@
+{
+  "contains_acted_or_synthetic_records": true,
+  "feature_order": [
+    "face.expression_angry",
+    "face.expression_fear",
+    "face.expression_happy",
+    "face.expression_neutral",
+    "face.expression_sad",
+    "face.expression_surprise",
+    "face.negative_affect_mean_angry_fear_sad",
+    "face.face_quality_score",
+    "behavior.movement_energy",
+    "behavior.sudden_movement",
+    "behavior.movement_change_from_baseline",
+    "behavior.shoulder_alignment",
+    "behavior.shoulder_asymmetry",
+    "behavior.left_upper_arm_angle_deg",
+    "behavior.right_upper_arm_angle_deg",
+    "behavior.left_forearm_angle_deg",
+    "behavior.right_forearm_angle_deg",
+    "behavior.head_offset_x",
+    "behavior.head_offset_y",
+    "behavior.head_orientation_deg",
+    "behavior.repetition_change",
+    "audio.rms_loudness",
+    "audio.spectral_centroid_hz",
+    "audio.spectral_bandwidth_hz",
+    "audio.spectral_flatness",
+    "audio.onset_score",
+    "audio.baseline_relative_rms",
+    "audio.audio_contribution"
+  ],
+  "limitations": "This model is a local pipeline demonstration only and is not validated clinical distress detection.",
+  "preprocessing": {
+    "class_weight": "balanced",
+    "feature_expansion": "value_plus_validity_flag_per_feature",
+    "missing_value_strategy": "median_imputation_with_validity_indicators",
+    "scaler": "standard"
+  },
+  "record_kinds": [
+    "synthetic_acted"
+  ],
+  "record_provenance": {
+    "live_monitoring": 0,
+    "synthetic_acted": 26
+  },
+  "record_split_by_group": true,
+  "schema_version": "phase3-feature-schema-v1",
+  "synthetic_data_warning": "Acted/synthetic training records are pipeline demonstrations only, not validated observations or clinical distress detection.",
+  "target_label_mapping": {
+    "no_sufficient_distress_evidence": 0,
+    "potential_distress": 1
+  },
+  "test_record_counts_by_class": {
+    "no_sufficient_distress_evidence": 4,
+    "potential_distress": 2
+  },
+  "training_record_counts_by_class": {
+    "no_sufficient_distress_evidence": 12,
+    "potential_distress": 14
+  },
+  "training_timestamp_utc": "2026-10-14T11:03:34.645149+00:00"
+}

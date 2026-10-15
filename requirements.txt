@@ -1,0 +1,10 @@
+numpy>=1.24
+joblib>=1.2
+scikit-learn>=1.2
+opencv-contrib-python>=4.8,<5
+sounddevice>=0.4.6
+streamlit>=1.37
+Pillow>=10.0
+torch==2.11.0
+torchvision==0.26.0
+mediapipe==1.1.0
