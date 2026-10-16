@@ -14,6 +14,11 @@ from alert_management import AlertManager, AlertPolicy
 from config import (
     BEHAVIOR_MOVEMENT_MAX_GAP_SECONDS,
     BEHAVIOR_MOVEMENT_WINDOW_SECONDS,
+    EXPERIMENTAL_DISTRESS_SCORE_FACE_MAX_ENTROPY,
+    EXPERIMENTAL_DISTRESS_SCORE_FRESHNESS_SECONDS,
+    EXPERIMENTAL_DISTRESS_SCORE_MIN_MODALITIES,
+    EXPERIMENTAL_DISTRESS_SCORE_WEIGHTS,
+    EXPERIMENTAL_DISTRESS_ALERT_THRESHOLD,
     LIVE_AUDIO_INTERVAL_SECONDS,
     LIVE_CAMERA_INTERVAL_SECONDS,
     LIVE_DASHBOARD_REFRESH_SECONDS,
@@ -36,6 +41,7 @@ from config import (
     RULE_MOVEMENT_VIGOROUS_SECONDS,
 )
 from feedback import FeedbackStorageError, FeedbackStore
+from distress_score import calculate_distress_score, score_alert_triggered
 from fusion import (
     build_fusion_diagnostic_snapshot,
     build_fusion_evidence,
@@ -404,6 +410,97 @@ def render_monitoring_panel() -> None:
         alert=alert,
         rule_based=rule_based,
         inference_timestamp=inference_timestamp,
+    )
+
+    score_result = calculate_distress_score(
+        snapshot,
+        weights=EXPERIMENTAL_DISTRESS_SCORE_WEIGHTS,
+        freshness_seconds=EXPERIMENTAL_DISTRESS_SCORE_FRESHNESS_SECONDS,
+        face_max_normalized_entropy=(
+            EXPERIMENTAL_DISTRESS_SCORE_FACE_MAX_ENTROPY
+        ),
+        minimum_modalities=EXPERIMENTAL_DISTRESS_SCORE_MIN_MODALITIES,
+    )
+    st.subheader("Experimental Multimodal Distress-Related Evidence Score")
+    st.caption(
+        "Separate read-only dashboard indicator; it does not affect detector "
+        "results or alert actions. This is not a probability or clinically "
+        "validated measurement."
+    )
+    if score_result.score is None:
+        st.info(
+            "Insufficient evidence — at least "
+            f"{EXPERIMENTAL_DISTRESS_SCORE_MIN_MODALITIES} fresh, valid, weighted "
+            "modalities are required."
+        )
+    else:
+        st.metric("Experimental evidence score (0–100)", f"{score_result.score:.1f}")
+    modality_columns = st.columns(3)
+    modality_labels = {
+        "emotion": "Emotion evidence",
+        "behavior": "Behaviour evidence",
+        "audio": "Audio activity evidence",
+    }
+    for column, modality in zip(modality_columns, ("emotion", "behavior", "audio")):
+        item = score_result.modalities[modality]
+        with column:
+            st.metric(
+                modality_labels[modality],
+                f"{item.score:.1f}" if item.score is not None else "Unavailable",
+            )
+            st.caption(
+                f"Configured weight: {item.weight:g}% · "
+                f"{'Contributed' if item.contributed else 'Not included'}"
+                + (
+                    f" · contribution {item.contribution:.1f}"
+                    if item.contribution is not None
+                    else ""
+                )
+            )
+    with st.expander("Score evidence and exclusions"):
+        st.caption(score_result.interpretation_warning)
+        for modality in ("emotion", "behavior", "audio"):
+            item = score_result.modalities[modality]
+            state_label = (
+                "contributed"
+                if item.contributed
+                else "valid but withheld by the minimum-evidence rule"
+                if item.available
+                else "unavailable"
+            )
+            st.write(f"**{modality_labels[modality]} — {state_label}**")
+            for detail in item.evidence:
+                st.caption(detail)
+            reason = score_result.excluded_reasons.get(modality) or item.reason
+            if reason:
+                st.caption(reason)
+
+    score_alert = score_alert_triggered(
+        score_result,
+        threshold=EXPERIMENTAL_DISTRESS_ALERT_THRESHOLD,
+    )
+    st.subheader("Multimodal Distress Alert")
+    st.caption(
+        "Experimental score-based dashboard indicator using indirect cues only. "
+        "It is not a diagnosis or validated distress probability and does not "
+        "change the existing detector, alert manager, or audio-peak alert."
+    )
+    if score_alert is True:
+        st.warning("Potential Distress — Caregiver Attention Recommended")
+    elif score_alert is False:
+        st.info("No score-based alert currently triggered")
+    else:
+        st.info("Unable to assess — insufficient evidence")
+    score_value = (
+        f"{score_result.score:.1f}/100"
+        if score_alert is not None
+        else "Unavailable"
+    )
+    score_alert_columns = st.columns(2)
+    score_alert_columns[0].metric("Current multimodal score", score_value)
+    score_alert_columns[1].metric(
+        "Configured alert threshold",
+        f"{EXPERIMENTAL_DISTRESS_ALERT_THRESHOLD:g}/100",
     )
 
     st.subheader("Monitoring and Sensors")

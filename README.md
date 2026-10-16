@@ -22,6 +22,7 @@ distress-companion/
 ├── app.py
 ├── alert_management.py
 ├── config.py
+├── distress_score.py
 ├── microphone.py
 ├── monitoring.py
 ├── monitoring_history.py
@@ -71,6 +72,8 @@ distress-companion/
 │   ├── test_audio_branch.py
 │   ├── test_monitoring.py
 │   ├── test_rule_based_detection.py
+│   ├── test_distress_score.py
+│   ├── test_distress_alert.py
 │   ├── test_microphone.py
 │   └── test_webcam.py
 └── reports/
@@ -111,6 +114,58 @@ the configured mode cannot be evaluated from fresh, valid evidence; a missing
 modality is never interpreted as calm. In `any` mode either available cue may
 trigger, while `audio_and_movement` requires both. Single-modality modes are
 explicit demonstration settings. Rule results contain no classifier probability.
+
+### Experimental multimodal evidence score
+
+The dashboard also displays a separate, read-only **experimental
+distress-related evidence score**. `distress_score.py` consumes the current
+face, behavior, and audio branch outputs and their existing monotonic success
+timestamps. It does not affect the existing detector, alert manager, feedback,
+history, or model training.
+
+The score maps the existing mean angry/fear/sad expression estimate directly
+to a bounded 0–100 expression-evidence scale; it requires a usable face result,
+valid contributing class values, and normalized prediction entropy no greater
+than 0.75. Entropy is the face model's normalized six-class softmax entropy in
+the range [0, 1]; the score-only cutoff is a provisional guard against broad,
+uncertain distributions, not a validated confidence criterion. Facial
+expression remains indirect context and does not establish distress.
+
+Behavior evidence uses ratios to the existing demonstration movement
+thresholds. Repetitive evidence is the weakest of the valid repetition-rate,
+amplitude, and elevated-movement-proportion threshold ratios. Vigorous evidence
+uses movement-energy ratio together with the existing peak-speed-or-peak-
+acceleration criterion; sudden movement uses its existing configured threshold.
+Valid wrist features or independently valid regional movement metrics can be
+used. The score takes the strongest available movement family rather than
+summing potentially overlapping movement measures.
+
+Audio evidence maps the branch's bounded `audio_contribution` from [0, 1] to
+0–100 and also requires valid RMS evidence. This value summarizes acoustic
+activity only; the audio branch is not a distress classifier. A genuine valid
+silent window can contribute an audio score of zero, while missing or invalid
+RMS evidence is excluded.
+
+Only fresh (at most 3 seconds old), explicitly valid modality scores are used.
+Missing, malformed, non-finite, invalid, and stale evidence is excluded, not
+imputed as zero. The provisional demonstration weights are emotion 20,
+behavior 45, and audio 35; they are normalized over contributing modalities.
+These values are not empirically validated. At least two
+positive-weight usable modalities are required, otherwise the dashboard shows
+**Insufficient evidence**. Weights, the freshness interval, entropy cutoff, and
+minimum modality count are score-only settings in `config.py`. These settings
+and mappings are demonstration choices, not empirically validated, calibrated,
+or clinically meaningful measures. The overall value is not a probability or
+diagnosis.
+
+Immediately below the score details, **Multimodal Distress Alert** provides an
+independent dashboard indicator based only on that score and the configurable
+`EXPERIMENTAL_DISTRESS_ALERT_THRESHOLD` in `config.py` (default 70/100). It
+recommends caregiver attention when an available score meets or exceeds the
+threshold. A missing or insufficient score is reported as unable to assess,
+never as a low score. This experimental alert uses indirect cues and is not a
+diagnosis or validated distress probability; it does not trigger or suppress
+the existing detector, alert manager, or lower-page audio-peak alert.
 
 ### Schema, optional model utilities, alerts, and feedback
 

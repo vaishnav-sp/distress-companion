@@ -84,3 +84,17 @@ RULE_MOVEMENT_REGIONS = (
     "right_leg",
     "whole_body",
 )
+
+# Experimental dashboard-only evidence score settings. These weights are
+# provisional demonstration values and have not been empirically validated.
+EXPERIMENTAL_DISTRESS_SCORE_WEIGHTS = {
+    "emotion": 20.0,
+    "behavior": 45.0,
+    "audio": 35.0,
+}
+EXPERIMENTAL_DISTRESS_SCORE_FRESHNESS_SECONDS = 3.0
+# Face prediction entropy is normalized to [0, 1]; exclude broadly uncertain
+# outputs above this demonstration cutoff.
+EXPERIMENTAL_DISTRESS_SCORE_FACE_MAX_ENTROPY = 0.75
+EXPERIMENTAL_DISTRESS_SCORE_MIN_MODALITIES = 2
+EXPERIMENTAL_DISTRESS_ALERT_THRESHOLD = 70.0
