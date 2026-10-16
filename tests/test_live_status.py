@@ -113,7 +113,7 @@ def test_app_renders_rule_cues_without_loading_or_mislabeling_model_scores():
     assert "Classifier probability" in source
     assert "Fusion inference status: **{fusion_status}**" in source
     assert "live_modalities = live_modality_summary(" in source
-    assert "LIVE RULE CUE ALERT — POTENTIAL DISTRESS" in source
+    assert "LIVE RULE-CUE ALERT — CONFIGURED CUE ACTIVE" in source
     assert "alert.activated_at_utc" in source
     assert "@st.fragment(run_every=LIVE_DASHBOARD_REFRESH_SECONDS)" in source
     assert "1.5" in source

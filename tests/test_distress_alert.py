@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from alert_notifications import score_popup_transition
 from config import EXPERIMENTAL_DISTRESS_ALERT_THRESHOLD
 from distress_score import (
     DistressScoreResult,
@@ -24,15 +25,16 @@ def _score_result(score, status="Available"):
 
 @pytest.mark.parametrize(
     ("score", "expected"),
-    [(69.9, False), (70.0, True), (70.1, True)],
+    [(59.9, False), (60.0, True), (60.1, True)],
 )
 def test_score_alert_uses_inclusive_configured_threshold(score, expected):
-    assert score_alert_triggered(_score_result(score), threshold=70.0) is expected
+    assert score_alert_triggered(_score_result(score), threshold=60.0) is expected
 
 
-def test_configured_default_threshold_is_70_and_is_used_by_default():
-    assert EXPERIMENTAL_DISTRESS_ALERT_THRESHOLD == 70.0
-    assert score_alert_triggered(_score_result(70.0)) is True
+def test_configured_default_threshold_is_60_and_is_used_by_default():
+    assert EXPERIMENTAL_DISTRESS_ALERT_THRESHOLD == 60.0
+    assert score_alert_triggered(_score_result(59.9)) is False
+    assert score_alert_triggered(_score_result(60.0)) is True
 
 
 def test_insufficient_evidence_never_triggers_or_becomes_a_low_score():
@@ -51,6 +53,31 @@ def _audio_snapshot(*, timestamp=100.0, rms=0.2, valid=True):
         "latest_audio_result": audio,
         "last_audio_success_timestamp": timestamp,
     }
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        {"status": "running"},
+        _audio_snapshot(timestamp=96.9),
+    ],
+)
+def test_insufficient_or_stale_score_never_creates_score_popup(snapshot):
+    score_result = calculate_distress_score(snapshot, now=100.0)
+    score_alert = score_alert_triggered(
+        score_result,
+        threshold=EXPERIMENTAL_DISTRESS_ALERT_THRESHOLD,
+    )
+
+    popup_message, score_was_active = score_popup_transition(
+        score_alert_active=score_alert,
+        previous_score_alert_active=False,
+        score=score_result.score,
+    )
+
+    assert score_result.score is None
+    assert popup_message is None
+    assert score_was_active is False
 
 
 @pytest.mark.parametrize(

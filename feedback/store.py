@@ -29,8 +29,16 @@ class FeedbackSubmission:
 
 
 def _minimal_feature_summary(record: FeatureRecord) -> str:
+    source = record.provenance.get("source")
+    if not isinstance(source, str) or source not in {
+        "live_monitoring",
+        "monitoring_diagnostic_snapshot",
+    }:
+        source = "unspecified"
     summary = {
         "schema_version": record.schema_version,
+        "record_kind": record.record_kind,
+        "provenance": {"source": source},
         "feature_values": {
             name: (
                 float(record.feature_values[name])
@@ -43,6 +51,14 @@ def _minimal_feature_summary(record: FeatureRecord) -> str:
         "feature_validity": {
             name: bool(record.feature_validity.get(name, False))
             for name in record.feature_names
+        },
+        "unavailable_reasons": {
+            name: str(
+                record.unavailable_reasons.get(name)
+                or "No valid feature value was available at submission."
+            )
+            for name in record.feature_names
+            if not record.feature_validity.get(name, False)
         },
     }
     return json.dumps(summary, sort_keys=True, separators=(",", ":"))

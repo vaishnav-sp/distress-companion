@@ -11,6 +11,7 @@ import cv2
 import streamlit as st
 
 from alert_management import AlertManager, AlertPolicy
+from alert_notifications import score_popup_transition
 from config import (
     BEHAVIOR_MOVEMENT_MAX_GAP_SECONDS,
     BEHAVIOR_MOVEMENT_WINDOW_SECONDS,
@@ -290,6 +291,13 @@ def _render_current_distress_status(
 
 
 st.set_page_config(page_title="Distress Companion | Phase 3", page_icon="🧩")
+
+
+@st.dialog("New alert")
+def show_alert_popup(message: str) -> None:
+    st.warning(message)
+
+
 st.title("Distress Companion — Phase 3")
 st.caption(
     "Local device checks, continuous multimodal monitoring, background rule-cue evaluation, "
@@ -315,6 +323,8 @@ if "feedback_store" not in st.session_state:
     st.session_state.feedback_store = FeedbackStore()
 if "feedback_message" not in st.session_state:
     st.session_state.feedback_message = None
+if "score_alert_was_active" not in st.session_state:
+    st.session_state.score_alert_was_active = False
 if "missed_event_idempotency_key" not in st.session_state:
     st.session_state.missed_event_idempotency_key = str(uuid.uuid4())
 if "camera_message" not in st.session_state:
@@ -479,6 +489,16 @@ def render_monitoring_panel() -> None:
         score_result,
         threshold=EXPERIMENTAL_DISTRESS_ALERT_THRESHOLD,
     )
+    score_alert_message = "Potential Distress — Caregiver Attention Recommended"
+    popup_message, score_alert_was_active = score_popup_transition(
+        score_alert_active=score_alert,
+        previous_score_alert_active=st.session_state.score_alert_was_active,
+        score=score_result.score,
+    )
+    st.session_state.score_alert_was_active = score_alert_was_active
+    if popup_message:
+        show_alert_popup(popup_message)
+
     st.subheader("Multimodal Distress Alert")
     st.caption(
         "Experimental score-based dashboard indicator using indirect cues only. "
@@ -486,7 +506,7 @@ def render_monitoring_panel() -> None:
         "change the existing detector, alert manager, or audio-peak alert."
     )
     if score_alert is True:
-        st.warning("Potential Distress — Caregiver Attention Recommended")
+        st.warning(score_alert_message)
     elif score_alert is False:
         st.info("No score-based alert currently triggered")
     else:
@@ -1438,7 +1458,7 @@ def render_monitoring_panel() -> None:
         if alert is not None and alert.state == "potential_distress":
             st.error(
                 (
-                    "**LIVE RULE CUE ALERT — POTENTIAL DISTRESS**\n\n"
+                    "**LIVE RULE-CUE ALERT — CONFIGURED CUE ACTIVE**\n\n"
                     if rule_based
                     else "**CARETAKER ALERT — POTENTIAL DISTRESS**\n\n"
                 )

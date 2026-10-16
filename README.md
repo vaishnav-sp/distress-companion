@@ -52,7 +52,11 @@ distress-companion/
 │   ├── __init__.py
 │   └── store.py
 ├── federated/
-│   └── __init__.py
+│   ├── __init__.py
+│   ├── virtual_students.py
+│   ├── flower_fedavg.py
+│   ├── run_flower_fedavg.py
+│   └── requirements-flower.txt
 ├── data/
 │   ├── raw/
 │   │   └── autism_emotion_dataset/
@@ -75,6 +79,7 @@ distress-companion/
 │   ├── test_distress_score.py
 │   ├── test_distress_alert.py
 │   ├── test_microphone.py
+│   ├── test_virtual_students.py
 │   └── test_webcam.py
 └── reports/
 ```
@@ -160,7 +165,8 @@ diagnosis.
 
 Immediately below the score details, **Multimodal Distress Alert** provides an
 independent dashboard indicator based only on that score and the configurable
-`EXPERIMENTAL_DISTRESS_ALERT_THRESHOLD` in `config.py` (default 70/100). It
+`EXPERIMENTAL_DISTRESS_ALERT_THRESHOLD` in `config.py` (default 60/100). This
+is an alerting threshold, not a clinically validated measure. It
 recommends caregiver attention when an available score meets or exceeds the
 threshold. A missing or insufficient score is reported as unable to assess,
 never as a low score. This experimental alert uses indirect cues and is not a
@@ -232,10 +238,16 @@ evidence behavior.
 Caretaker confirmations, rejections, and missed-event reports are stored in a
 local SQLite database at `~/.distress_companion/feedback.sqlite3` (Windows:
 `%USERPROFILE%\\.distress_companion\\feedback.sqlite3`). Feedback includes only
-an alert reference when applicable and numerical feature values with validity
-flags. It stores no names, personal identifiers, images, audio, or video.
-Idempotency keys prevent duplicate submissions across reruns. Feedback does not
-automatically retrain a model.
+an alert reference when applicable, numerical feature values with validity
+flags, unavailable-feature reasons, and limited feature-record provenance.
+Missing values remain null and invalid; no measurements are invented. A missed
+event is stored with its own `missed_event` action and no alert ID. It stores no
+names, personal identifiers, images, audio, or video. Idempotency keys prevent
+duplicate submissions across reruns, and the `FeedbackStore.list_feedback()`
+interface retrieves saved records after reopening the database. Feedback is
+stored for later review but is not consumed by training or personalization;
+submitting feedback does not change the running detector or model. Model
+training remains a separate explicit workflow using reviewed, labeled records.
 
 To train the multimodal fusion model, first prepare a UTF-8 JSONL file containing
 one complete serialized `FeatureRecord` per line plus an explicit ground-truth
@@ -295,6 +307,148 @@ use it only to smoke-test schema-v2 serialization, group splitting, and artifact
 compatibility. Training metadata records the canonical feature order, schema
 version, source counts, synthetic/acted status, and train/test scenario-group
 split summary.
+
+### Phase 4 Milestone 1: reviewed local fusion-head foundation
+
+Caretaker feedback is not a training label. Confirm, Reject, and Report Missed
+Event records remain excluded unless a separate local review manifest explicitly
+marks the record `approved_for_training` and supplies one of the exact binary
+labels `potential_distress` or `no_sufficient_distress_evidence`. The action is
+retained as provenance and is never mapped to a label. Excluded or ambiguous
+reviews are not used; missed-event reports remain ineligible until independently
+reviewed and explicitly labeled. Approved manifest entries also require an
+opaque local `reviewer_reference`; use a pseudonymous code, not a name.
+The loader cannot authenticate the reviewer or prove they differ from the
+feedback submitter because the existing feedback store has no submitter
+identity; the independent-review process must be enforced locally.
+
+Create a local UTF-8 JSONL manifest with one object per reviewed feedback ID.
+For each approved entry, include `manifest_version` set to
+`phase4-reviewed-feedback-manifest-v1`, `feedback_id`, `review_decision`,
+`training_label`, timezone-aware `reviewed_at_utc`,
+`event_window_start_utc`, `event_window_end_utc`,
+`modality_timestamps_utc` for exactly the modalities with valid features, and an
+opaque `evidence_context_reference`. The event-window and modality timestamps
+must be copied from independently verified local evidence; a reference string
+does not itself verify them. Every modality timestamp must be in the window and
+within the fixed 3-second window-end freshness limit. Keep manifests in a
+local-only location, not in a shared/synchronized folder. The feedback store
+currently does not capture event-window or modality timestamps, so existing
+feedback cannot pass this gate unless that context is independently available
+and explicitly entered; the loader reports missing context instead of inventing
+it. The loader also rejects incompatible schemas, non-finite/malformed values,
+fewer than four valid features, fewer than two available modalities, duplicate
+manifest entries, and unsupported fields. Exported training records contain
+only numerical features, validity flags, explicit labels, and limited review
+provenance; raw images, audio, and video are not accepted.
+
+After preparing the manifest, explicitly export eligible examples to a local
+file (replace paths with local paths as appropriate):
+
+```powershell
+.\.venv\Scripts\python.exe -m training.prepare_reviewed_feedback --review-manifest data\private\review_manifest.jsonl --output data\private\reviewed_features.jsonl
+```
+
+The isolated `training.fusion_head` module initializes a dedicated
+`phase4-fusion-head-v1` head and provides `fine_tune_fusion_head` for explicit
+offline training from a supplied compatible head and eligible reviewed examples.
+Its input is the canonical `phase3-feature-schema-v2` order (36 features), with
+each feature encoded as an interleaved numeric value and validity flag (72
+columns total). Missing values are replaced by the fixed constant 0.0 while the
+validity flag remains 0.0; the pipeline performs no scaling or
+client-specific/data-dependent preprocessing fit. Metadata records the schema,
+feature order, preprocessing contract, and binary label mapping. Save these
+artifacts to a dedicated local path; they do not overwrite or load the existing
+schema-v1 checkpoint and are not connected to live inference. There are no
+simulated clients, federated aggregation, or automatic feedback training in
+Milestone 1.
+
+### Phase 4 Milestone 2: simulated virtual-student clients
+
+`federated.virtual_students` provides deterministic local client partitions for
+3–5 virtual students. A `VirtualStudentConfig` supplies the client count and
+seed. Infrastructure-test mode uses explicitly labeled numerical records
+marked `synthetic_test`; these records exist only to exercise partitioning and
+the Milestone 1 fusion-head input contract. They are synthetic test data, not
+real-world or clinical performance evidence.
+
+Reviewed mode takes a local `FeedbackStore` and review-manifest path, and calls
+the Milestone 1 `load_reviewed_feedback` eligibility pipeline itself. Only its
+accepted examples are partitioned. A default 20% per-class holdout is kept
+separate from every client's training data. Client training requires at least
+one example from each explicit class; an insufficient dataset or duplicate
+source event/window fails with an actionable error instead of fabricating
+labels or silently rebalancing data. Reviewed partitions use deterministic
+feature-ordered, weighted class allocation to make clients non-IID while
+retaining each original local record. Keep the store, manifest, and resulting
+partitions local; there is no client networking, aggregation, or server
+orchestration in this milestone.
+
+Each `VirtualStudentClient` exposes a stable ID, its own training-partition
+loader, a copy of the shared fusion-head metadata contract, and aggregate
+sample/class/feature-validity statistics. These statistics do not include
+individual records.
+
+### Phase 4 Milestone 3: isolated Flower FedAvg experiment
+
+The federated workflow lives in `federated.flower_fedavg` and uses Flower
+`ClientApp`, `ServerApp`, and its `FedAvg` strategy. The simulation starts every
+client from the same global coefficient/intercept arrays, verifies the schema,
+canonical feature order, model version, preprocessing and label contracts, and
+rejects a round unless all configured clients (3–5) return compatible updates.
+Flower performs the real sample-count-weighted FedAvg; preprocessing is fixed
+zero-imputation and is never aggregated. Client updates contain only model
+parameters and aggregate counts/protocol metadata, not local rows, feedback
+records, windows, event IDs, or media. Participation and update summaries are
+stored in each global model's federated metadata sidecar.
+
+Flower and Ray are deliberately isolated from the live application's
+`requirements.txt`. Flower 1.20.0 pins the simulation extra to Ray 2.31.0 and
+is tested with Python 3.11 on WSL2. Flower documents WSL2 as the recommended
+simulation environment on Windows because Windows Ray support is experimental.
+From the repository root in WSL2, create the isolated environment and install
+the pinned experiment dependencies:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+"$HOME/.local/bin/uv" python install 3.11
+"$HOME/.local/bin/uv" venv "$HOME/.venvs/distress-flower" --python 3.11
+"$HOME/.local/bin/uv" pip install \
+  --python "$HOME/.venvs/distress-flower/bin/python" \
+  -r federated/requirements-flower.txt
+```
+
+Run a three-client, two-round synthetic infrastructure test from the repository
+root (never treat its results as real-world or clinical performance):
+
+```bash
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  "$HOME/.venvs/distress-flower/bin/python" -m federated.run_flower_fedavg \
+  --data-mode synthetic_test --clients 3 --rounds 2 --seed 42 \
+  --output-directory federated/output
+```
+
+For reviewed-data operation, pass the local feedback database and reviewed
+manifest explicitly; the same Milestone 1 eligibility loader is applied before
+clients are formed:
+
+```bash
+"$HOME/.venvs/distress-flower/bin/python" -m federated.run_flower_fedavg \
+  --data-mode reviewed --clients 3 --rounds 2 --seed 42 \
+  --feedback-db data/private/feedback.sqlite3 \
+  --review-manifest data/private/review_manifest.jsonl \
+  --output-directory federated/output
+```
+
+Every run writes a new versioned `global-model-rNNNN-<digest>.joblib` plus the
+standard fusion-head metadata and a separate `.federated.json` sidecar. The
+sidecar records schema/order, architecture, preprocessing and label contracts,
+rounds, participation, sample-count weighting, random seed, and initial/final
+parameter summaries. `load_federated_fusion_head(path)` validates both the
+existing Milestone 1 artifact and federated metadata before offline inference.
+Existing checkpoints are never overwritten, and these artifacts are not loaded
+by live monitoring.
+
 Run the dashboard with:
 
 ```powershell

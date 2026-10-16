@@ -4,6 +4,7 @@ from alert_management import AlertManager, AlertPolicy
 from feedback import FeedbackStore
 from fusion import build_fusion_evidence, evidence_to_feature_record
 from fusion.schema import FEATURE_SCHEMA_VERSION, FeatureRecord, feature_order
+from monitoring import MonitoringManager
 from training import infer_distress_status, train_distress_logistic_model
 
 
@@ -29,6 +30,12 @@ def _face_training_record(scenario, feature_values):
 
 
 def test_feature_record_to_model_inference_alert_and_feedback(tmp_path):
+    monitoring = MonitoringManager(
+        face_branch_factory=lambda: None,
+        behavior_branch_factory=lambda: None,
+        audio_branch_factory=lambda: None,
+    )
+    monitoring_state_before_feedback = monitoring.snapshot()
     distress_profile = {
         "face.expression_angry": 0.8,
         "face.expression_fear": 0.1,
@@ -169,6 +176,14 @@ def test_feature_record_to_model_inference_alert_and_feedback(tmp_path):
     alert = alerts.update(inference, result_timestamp=10.0, now=10.0)
     assert alert.state == "potential_distress"
     assert alert.activated_at_utc is not None
+    alert_state_before_feedback = alerts.diagnostic_state()
+    model_coefficients_before_feedback = (
+        model.pipeline.named_steps["classifier"].coef_.copy()
+    )
+    model_intercepts_before_feedback = (
+        model.pipeline.named_steps["classifier"].intercept_.copy()
+    )
+    feature_record_before_feedback = live_record.to_json()
 
     saved = FeedbackStore(tmp_path / "feedback.sqlite3").submit(
         "confirm_alert",
@@ -185,3 +200,29 @@ def test_feature_record_to_model_inference_alert_and_feedback(tmp_path):
     )
     assert rejected.inserted
     assert rejected.alert_id == alert.alert_id
+    store = FeedbackStore(tmp_path / "feedback.sqlite3")
+    store.submit(
+        "missed_event",
+        idempotency_key="independent-missed-event",
+        record=live_record,
+    )
+
+    assert alerts.diagnostic_state() == alert_state_before_feedback
+    assert (
+        model.pipeline.named_steps["classifier"].coef_
+        == model_coefficients_before_feedback
+    ).all()
+    assert (
+        model.pipeline.named_steps["classifier"].intercept_
+        == model_intercepts_before_feedback
+    ).all()
+    assert live_record.to_json() == feature_record_before_feedback
+    assert monitoring.snapshot() == monitoring_state_before_feedback
+    stored_rows = store.list_feedback()
+    assert {row["action"] for row in stored_rows} == {
+        "confirm_alert",
+        "reject_alert",
+        "missed_event",
+    }
+    missed_report = next(row for row in stored_rows if row["action"] == "missed_event")
+    assert missed_report["alert_id"] is None
