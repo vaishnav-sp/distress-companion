@@ -34,6 +34,20 @@ def _reviewed_record(index):
         for name in names
     }
     validity = {name: name in valid_names for name in names}
+    created_at = datetime.now(timezone.utc)
+    anchor_utc = created_at - timedelta(milliseconds=10 + index * 10)
+    anchor_monotonic = 1000.0 + index
+    source_timestamps_monotonic = {
+        "face": anchor_monotonic - 0.2,
+        "behavior": anchor_monotonic - 0.1,
+    }
+    source_timestamps_utc = {
+        modality: (
+            anchor_utc
+            + timedelta(seconds=timestamp - anchor_monotonic)
+        ).isoformat()
+        for modality, timestamp in source_timestamps_monotonic.items()
+    }
     return FeatureRecord(
         schema_version=FEATURE_SCHEMA_VERSION,
         feature_names=names,
@@ -46,29 +60,39 @@ def _reviewed_record(index):
         },
         modality_status={"face": "ok", "behavior": "ok", "audio": "waiting"},
         modality_messages={"face": "", "behavior": "", "audio": ""},
-        provenance={"source": "live_monitoring"},
+        provenance={
+            "source": "live_rule_based_monitoring",
+            "snapshot_id": f"student-window-{index}",
+            "source_timestamp_clock": "monotonic",
+            "source_timestamp_anchor_utc": anchor_utc.isoformat(),
+            "source_timestamp_anchor_monotonic": anchor_monotonic,
+            "source_timestamps_monotonic": source_timestamps_monotonic,
+            "source_timestamps_utc": source_timestamps_utc,
+        },
+        created_at_utc=created_at.isoformat(),
     )
 
 
 def _review_manifest(feedback, index, label, **updates):
-    submitted = datetime.fromisoformat(
-        feedback["submitted_at_utc"].replace("Z", "+00:00")
-    ).astimezone(timezone.utc)
-    end = submitted - timedelta(milliseconds=250)
-    start = end - timedelta(seconds=1)
+    provenance = json.loads(feedback["feature_summary_json"])["provenance"]
+    modality_timestamps = provenance["source_timestamps_utc"]
+    source_times = [
+        datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone(
+            timezone.utc
+        )
+        for timestamp in modality_timestamps.values()
+    ]
     item = {
         "manifest_version": REVIEW_MANIFEST_VERSION,
         "feedback_id": feedback["feedback_id"],
+        "snapshot_id": provenance["snapshot_id"],
         "review_decision": "approved_for_training",
         "reviewer_reference": "local-reviewer-1",
         "training_label": label,
         "reviewed_at_utc": datetime.now(timezone.utc).isoformat(),
-        "event_window_start_utc": start.isoformat(),
-        "event_window_end_utc": end.isoformat(),
-        "modality_timestamps_utc": {
-            "face": (end - timedelta(milliseconds=100)).isoformat(),
-            "behavior": (end - timedelta(milliseconds=200)).isoformat(),
-        },
+        "event_window_start_utc": min(source_times).isoformat(),
+        "event_window_end_utc": max(source_times).isoformat(),
+        "modality_timestamps_utc": modality_timestamps,
         "evidence_context_reference": f"event-{index}",
     }
     item.update(updates)

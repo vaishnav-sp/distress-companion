@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from datetime import datetime, timedelta
 import time
 
 import pytest
@@ -815,6 +816,35 @@ def test_monitoring_processor_builds_rule_result_without_classifier_probability(
     assert inference.potential_distress_probability is None
     assert result["feature_record"].schema_version == FEATURE_SCHEMA_VERSION
     assert result["source_timestamp"] == pytest.approx(timestamp)
+    record_provenance = result["feature_record"].provenance
+    assert record_provenance["snapshot_id"]
+    assert record_provenance["source_timestamps_monotonic"]["audio"] == timestamp
+    anchor_utc = datetime.fromisoformat(
+        record_provenance["source_timestamp_anchor_utc"]
+    )
+    expected_source_utc = anchor_utc + timedelta(
+        seconds=timestamp
+        - record_provenance["source_timestamp_anchor_monotonic"]
+    )
+    actual_source_utc = datetime.fromisoformat(
+        record_provenance["source_timestamps_utc"]["audio"]
+    )
+    assert abs((actual_source_utc - expected_source_utc).total_seconds()) <= 0.001
+    duplicate_snapshot = processor(
+        {
+            "latest_face_result": None,
+            "latest_behavior_result": None,
+            "latest_audio_result": audio,
+            "last_face_success_timestamp": None,
+            "last_behavior_success_timestamp": None,
+            "last_audio_success_timestamp": timestamp,
+        }
+    )
+    assert duplicate_snapshot["result_key"] == result["result_key"]
+    assert (
+        duplicate_snapshot["feature_record"].provenance["snapshot_id"]
+        == record_provenance["snapshot_id"]
+    )
 
 
 def test_rule_inference_is_unknown_after_monitoring_stop_and_restart_resets_window():

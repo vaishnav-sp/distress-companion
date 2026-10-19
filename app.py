@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
+import os
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING
 import uuid
 
@@ -42,6 +45,30 @@ from config import (
     RULE_MOVEMENT_VIGOROUS_SECONDS,
 )
 from feedback import FeedbackStorageError, FeedbackStore
+from feedback.presentation import (
+    alert_feedback_context_for_snapshot,
+    record_for_score_snapshot,
+    retained_alert_feedback_context,
+    submit_alert_feedback,
+)
+from training.personalization_demo import (
+    PersonalizationResult,
+    run_reviewed_personalization,
+    run_synthetic_personalization_demo,
+    reviewed_training_block_reason,
+)
+from training.reviewed_feedback import (
+    feedback_review_block_reason,
+    feedback_review_provenance_diagnostic,
+    feedback_review_statuses,
+    load_reviewed_feedback,
+)
+from training.demo_feedback_reviews import (
+    DEMO_TRAINING_LABELS,
+    append_demo_feedback_review,
+    load_demo_feedback_reviews,
+    load_demo_training_dataset,
+)
 from distress_score import calculate_distress_score, score_alert_triggered
 from fusion import (
     build_fusion_diagnostic_snapshot,
@@ -70,6 +97,24 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
 logger = logging.getLogger(__name__)
+REVIEW_MANIFEST_PATH = Path(
+    os.environ.get(
+        "DISTRESS_REVIEW_MANIFEST",
+        str(Path.home() / ".distress_companion" / "review_manifest_v2.jsonl"),
+    )
+).expanduser()
+DEMO_REVIEW_PATH = Path(
+    os.environ.get(
+        "DISTRESS_DEMO_REVIEW_FILE",
+        str(Path.home() / ".distress_companion" / "demo_feedback_reviews.jsonl"),
+    )
+).expanduser()
+PERSONALIZATION_DIRECTORY = Path(
+    os.environ.get(
+        "DISTRESS_PERSONALIZATION_DIR",
+        str(Path.home() / ".distress_companion" / "personalized_models"),
+    )
+).expanduser()
 
 
 def get_face_branch() -> FaceExpressionBranch:
@@ -279,9 +324,9 @@ def _render_current_distress_status(
         f"<div style='padding:1rem 1.25rem; border:1px solid {border}; border-radius:12px; background:{bg}; margin-bottom:1rem;'>"
         f"<div style='font-size:0.82rem; text-transform:uppercase; letter-spacing:0.08em; color:{accent}; font-weight:700;'>Current Distress Status</div>"
         f"<div style='font-size:2rem; font-weight:700; margin:0.35rem 0; color:{accent};'>{label}</div>"
-        f"<div style='font-size:0.95rem; color:#e5e7eb; margin-bottom:0.35rem;'>{sublabel}</div>"
-        f"<div style='font-size:0.9rem; color:#d1d5db; margin-bottom:0.2rem;'>{narrative}</div>"
-        f"<div style='display:flex; gap:1rem; flex-wrap:wrap; margin-top:0.5rem; font-size:0.82rem; color:#cbd5e1;'>"
+        f"<div style='font-size:0.95rem; color:var(--text-color); opacity:0.92; margin-bottom:0.35rem;'>{sublabel}</div>"
+        f"<div style='font-size:0.9rem; color:var(--text-color); opacity:0.82; margin-bottom:0.2rem;'>{narrative}</div>"
+        f"<div style='display:flex; gap:1rem; flex-wrap:wrap; margin-top:0.5rem; font-size:0.82rem; color:var(--text-color); opacity:0.78;'>"
         f"<span><strong>Evidence:</strong> {score_block}</span>"
         f"<span><strong>Updated:</strong> {evidence_time if evidence_time is not None else 'not available'}</span>"
         f"</div>"
@@ -290,15 +335,533 @@ def _render_current_distress_status(
     )
 
 
-st.set_page_config(page_title="Distress Companion | Phase 3", page_icon="🧩")
+st.set_page_config(page_title="Autism Distress Companion", page_icon="🧩")
+st.markdown(
+    """
+    <style>
+    :root {
+        --dashboard-accent: #148b83;
+        --dashboard-border: rgba(128, 145, 165, 0.24);
+    }
+
+    [data-testid="stAppViewContainer"] .main .block-container {
+        max-width: 1500px;
+        padding-top: 1.35rem;
+        padding-bottom: 2rem;
+    }
+
+    [data-testid="stAppViewContainer"] .main h1 {
+        font-size: clamp(1.8rem, 2.5vw, 2.25rem);
+        line-height: 1.2;
+        letter-spacing: -0.025em;
+        margin-bottom: 0.3rem;
+    }
+
+    [data-testid="stAppViewContainer"] .main h2 {
+        font-size: 1.38rem;
+        line-height: 1.3;
+        letter-spacing: -0.012em;
+        margin-top: 0.35rem;
+        margin-bottom: 0.3rem;
+    }
+
+    [data-testid="stAppViewContainer"] .main h3 {
+        font-size: 1.08rem;
+        line-height: 1.35;
+        margin-top: 0.25rem;
+        margin-bottom: 0.25rem;
+    }
+
+    [data-testid="stAppViewContainer"] .main [data-testid="stVerticalBlock"] {
+        gap: 0.8rem;
+    }
+
+    [data-testid="stAppViewContainer"] .main [data-testid="stMetric"] {
+        padding: 0.7rem 0.85rem;
+        border: 1px solid var(--dashboard-border);
+        border-radius: 0.7rem;
+        background: var(--secondary-background-color);
+    }
+
+    [data-testid="stAppViewContainer"] .main [data-testid="stMetricLabel"] {
+        font-size: 0.82rem;
+    }
+
+    [data-testid="stAppViewContainer"] .main [data-testid="stMetricValue"] {
+        font-size: 1.45rem;
+        line-height: 1.25;
+    }
+
+    [data-testid="stAppViewContainer"] .main [data-testid="stTable"] {
+        border: 1px solid var(--dashboard-border);
+        border-radius: 0.65rem;
+        overflow: hidden;
+    }
+
+    [data-testid="stAppViewContainer"] .main [data-testid="stTable"] th,
+    [data-testid="stAppViewContainer"] .main [data-testid="stTable"] td {
+        padding: 0.42rem 0.62rem;
+        font-size: 0.88rem;
+        line-height: 1.35;
+    }
+
+    [data-testid="stAppViewContainer"] .main [data-testid="stAlert"] {
+        border-radius: 0.65rem;
+    }
+
+    [data-testid="stAppViewContainer"] .main [data-testid="stButton"] button,
+    [data-testid="stAppViewContainer"] .main [data-testid="stFormSubmitButton"] button {
+        min-height: 2.55rem;
+        border-radius: 0.55rem;
+        font-weight: 600;
+        transition: filter 120ms ease, border-color 120ms ease;
+    }
+
+    [data-testid="stAppViewContainer"] .main [data-testid="stButton"] button:hover,
+    [data-testid="stAppViewContainer"] .main [data-testid="stFormSubmitButton"] button:hover {
+        border-color: var(--dashboard-accent);
+        filter: brightness(1.04);
+    }
+
+    [data-testid="stAppViewContainer"] .main button[kind="primary"] {
+        background: var(--dashboard-accent);
+        border-color: var(--dashboard-accent);
+    }
+
+    [data-testid="stAppViewContainer"] .main [data-testid="stHorizontalBlock"] {
+        gap: 0.9rem;
+    }
+
+    [data-testid="stAppViewContainer"] .main hr {
+        margin: 0.5rem 0 0.8rem;
+        border-color: var(--dashboard-border);
+    }
+
+    @media (max-width: 700px) {
+        [data-testid="stAppViewContainer"] .main .block-container {
+            padding: 1rem 1rem 1.5rem;
+        }
+
+        [data-testid="stAppViewContainer"] .main h2 {
+            font-size: 1.22rem;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 @st.dialog("New alert")
-def show_alert_popup(message: str) -> None:
+def show_alert_popup(message: str, alert_id: str) -> None:
     st.warning(message)
+    feedback_context = st.session_state.get("score_popup_feedback_context")
+    context_matches = (
+        feedback_context is not None
+        and feedback_context.alert_id == alert_id
+    )
+    snapshot_available = (
+        context_matches and feedback_context.record is not None
+    )
+    if not snapshot_available:
+        st.info(
+            "The feature snapshot associated with this alert is unavailable; "
+            "feedback buttons are disabled."
+        )
+
+    submitted_result = st.session_state.get("score_popup_feedback_result") or {}
+    already_submitted = (
+        submitted_result.get("alert_id") == alert_id
+        and submitted_result.get("submitted") is True
+    )
+    feedback_columns = st.columns(2)
+    for column, action, label in (
+        (feedback_columns[0], "confirm_alert", "Confirm"),
+        (feedback_columns[1], "reject_alert", "Reject"),
+    ):
+        with column:
+            if st.button(
+                label,
+                key=f"score_popup_{action}_{alert_id}",
+                disabled=not snapshot_available or already_submitted,
+            ):
+                try:
+                    result = submit_alert_feedback(
+                        st.session_state.feedback_store,
+                        feedback_context,
+                        action,
+                    )
+                    st.session_state.score_popup_feedback_result = {
+                        "alert_id": alert_id,
+                        "submitted": True,
+                        "message": (
+                            "Feedback saved locally."
+                            if result.inserted
+                            else "Feedback for this alert was already saved."
+                        ),
+                        "is_error": False,
+                    }
+                    st.rerun()
+                except (FeedbackStorageError, ValueError) as exc:
+                    st.session_state.score_popup_feedback_result = {
+                        "alert_id": alert_id,
+                        "submitted": False,
+                        "message": f"Feedback storage failed: {exc}",
+                        "is_error": True,
+                    }
+
+    submitted_result = st.session_state.get("score_popup_feedback_result") or {}
+    if submitted_result.get("alert_id") == alert_id:
+        if submitted_result.get("is_error"):
+            st.error(submitted_result["message"])
+        elif submitted_result.get("submitted"):
+            st.success(submitted_result["message"])
 
 
-st.title("Distress Companion — Phase 3")
+def _render_feedback_history_and_personalization() -> None:
+    st.header("Feedback History and Review")
+    review_notice = st.session_state.pop("review_notice", None)
+    review_notice_kind = st.session_state.pop("review_notice_kind", "success")
+    if review_notice:
+        if review_notice_kind == "warning":
+            st.warning(review_notice)
+        elif review_notice_kind == "error":
+            st.error(review_notice)
+        else:
+            st.success(review_notice)
+    st.caption(
+        "Feedback records are read-only here. Confirm, Reject, and Report Missed "
+        "Event are caregiver actions, not verified labels. Raw feature vectors and "
+        "private identifiers are not shown."
+    )
+    st.caption(
+        "Demonstration labels are manually assigned, locally stored, and not "
+        "independently verified ground truth. They do not enter the v2 training loader."
+    )
+
+    feedback_store = st.session_state.feedback_store
+    try:
+        feedback_rows = feedback_store.list_feedback()
+        review_statuses = feedback_review_statuses(
+            feedback_store, REVIEW_MANIFEST_PATH
+        )
+        demo_reviews = load_demo_feedback_reviews(DEMO_REVIEW_PATH)
+        demo_training_dataset = load_demo_training_dataset(
+            feedback_store,
+            DEMO_REVIEW_PATH,
+            feedback_rows=feedback_rows,
+            reviews=demo_reviews,
+        )
+    except FeedbackStorageError as exc:
+        st.error(f"Could not read local feedback history: {exc}")
+        return
+    except (OSError, ValueError) as exc:
+        st.error(f"Could not read local review status: {exc}")
+        return
+
+    table_rows: list[dict[str, str]] = []
+    selector_labels: dict[str, str] = {}
+    demo_examples_by_id = {
+        example.feedback_id: example for example in demo_training_dataset.examples
+    }
+    history_rows = sorted(
+        feedback_rows,
+        key=lambda row: str(row.get("submitted_at_utc") or ""),
+        reverse=True,
+    )
+    reviewability: dict[str, tuple[bool, str | None]] = {}
+    for row in history_rows:
+        feedback_id = row.get("feedback_id")
+        if not isinstance(feedback_id, str):
+            continue
+        status = review_statuses.get(feedback_id)
+        if status is None:
+            continue
+        block_reason = feedback_review_block_reason(row, feedback_id)
+        reviewability[feedback_id] = (block_reason is None, block_reason)
+        demo_review = demo_reviews.get(feedback_id)
+        demo_ineligible_reason = demo_training_dataset.ineligible_reasons.get(
+            feedback_id
+        )
+        if status.status == "Excluded":
+            displayed_review_status = "Excluded"
+        elif demo_review is not None or status.status != "Awaiting review":
+            displayed_review_status = "Reviewed"
+        else:
+            displayed_review_status = "Awaiting review"
+        action = str(row.get("action") or "unknown")
+        submitted_at = str(row.get("submitted_at_utc") or "Unavailable")
+        try:
+            summary = json.loads(row.get("feature_summary_json") or "{}")
+        except json.JSONDecodeError:
+            summary = {}
+        provenance = summary.get("provenance", {}) if isinstance(summary, dict) else {}
+        if not isinstance(provenance, dict):
+            provenance = {}
+        modality_times = provenance.get("source_timestamps_utc", {})
+        modality_names = (
+            ", ".join(sorted(modality_times))
+            if isinstance(modality_times, dict) and modality_times
+            else "Unavailable"
+        )
+        safe_summary = (
+            f"Schema {summary.get('schema_version', 'unavailable')}; "
+            f"record {summary.get('record_kind', 'unavailable')}; "
+            f"snapshot provenance "
+            f"{'available' if provenance.get('provenance_available') is True else 'unavailable'}; "
+            f"modalities: {modality_names}"
+        )
+        table_rows.append(
+            {
+                "Submitted (UTC)": submitted_at,
+                "Action": action,
+                "Review status": displayed_review_status,
+                "Training eligibility": (
+                    "Eligible (v2 reviewed data)"
+                    if status.training_eligibility == "Eligible"
+                    else "Eligible for demo training only (manual label; unverified)"
+                    if feedback_id in demo_examples_by_id
+                    else (
+                        f"Not eligible for demo training: {demo_ineligible_reason}"
+                        if demo_review is not None and demo_ineligible_reason
+                        else "Not eligible"
+                    )
+                ),
+                "Training label": (
+                    demo_review.training_label
+                    if demo_review is not None
+                    else status.training_label or "Not assigned"
+                ),
+                "Persisted provenance": (
+                    "Complete"
+                    if block_reason is None
+                    else f"Incomplete: {block_reason}"
+                ),
+                "Safe metadata summary": safe_summary,
+            }
+        )
+        selector_labels[feedback_id] = (
+            f"{submitted_at} · {action} · {displayed_review_status}"
+        )
+
+    if table_rows:
+        st.table(table_rows)
+    else:
+        st.info("No locally stored caregiver feedback is available yet.")
+
+    st.subheader("Review a Feedback Row")
+    st.write(
+        "Choose a demonstration label manually. Confirm, Reject, and Report Missed "
+        "Event actions are not converted into labels. This label is not verified "
+        "ground truth and is not a training approval."
+    )
+    if history_rows:
+        pending_ids = [
+            row["feedback_id"]
+            for row in history_rows
+            if isinstance(row.get("feedback_id"), str)
+            and review_statuses[row["feedback_id"]].status == "Awaiting review"
+            and row["feedback_id"] not in demo_reviews
+        ]
+        default_feedback_id = next(
+            iter(pending_ids or selector_labels),
+            None,
+        )
+        selector_options = (
+            [default_feedback_id]
+            + [
+                feedback_id
+                for feedback_id in selector_labels
+                if feedback_id != default_feedback_id
+            ]
+            if default_feedback_id is not None
+            else []
+        )
+        selected_feedback_id = st.selectbox(
+            "Feedback row",
+            options=selector_options,
+            format_func=lambda feedback_id: selector_labels[feedback_id],
+            key="review_feedback_row",
+        )
+        selected_row = next(
+            row
+            for row in feedback_rows
+            if row.get("feedback_id") == selected_feedback_id
+        )
+        provenance_diagnostic = feedback_review_provenance_diagnostic(
+            selected_row, selected_feedback_id
+        )
+        st.caption("Persisted provenance diagnostic (read-only; not used to assign labels):")
+        st.table(
+            [
+                {"Required category": category, "Status": category_status}
+                for category, category_status in provenance_diagnostic.items()
+            ]
+        )
+        selected_review_status = review_statuses.get(selected_feedback_id)
+        selected_demo_review = demo_reviews.get(selected_feedback_id)
+        already_reviewed = (
+            selected_demo_review is not None
+            or (
+                selected_review_status is not None
+                and selected_review_status.status != "Awaiting review"
+            )
+        )
+        if already_reviewed:
+            st.info(
+                "This feedback row already has a saved review. Reviews are "
+                "append-only and cannot be replaced."
+            )
+        with st.form("review_feedback_form", clear_on_submit=False):
+            training_label = st.selectbox(
+                "Demonstration label",
+                options=[
+                    "— Select a label —",
+                    "potential_distress",
+                    "no_sufficient_distress_evidence",
+                ],
+                key="demo_review_training_label",
+            )
+            st.caption(
+                "One demonstration review per feedback row. The original feedback "
+                "snapshot and record are not modified."
+            )
+            save_review = st.form_submit_button(
+                "Save Review",
+                disabled=already_reviewed,
+                type="primary",
+            )
+        if save_review:
+            if training_label not in DEMO_TRAINING_LABELS:
+                st.error("Select potential_distress or no_sufficient_distress_evidence.")
+            else:
+                try:
+                    append_demo_feedback_review(
+                        feedback_store,
+                        DEMO_REVIEW_PATH,
+                        selected_feedback_id,
+                        training_label,
+                    )
+                except (
+                    ValueError,
+                    OSError,
+                    FeedbackStorageError,
+                ) as exc:
+                    st.error(f"Review was not saved: {exc}")
+                else:
+                    st.session_state.review_notice_kind = "success"
+                    st.session_state.review_notice = (
+                        "Demonstration review saved locally. This manually assigned "
+                        "label is not independently verified ground truth and is not "
+                        "eligible for training."
+                    )
+                    st.rerun()
+    else:
+        st.info("Save feedback first to enable explicit review.")
+
+    st.subheader("Train / Personalize")
+    try:
+        reviewed = (
+            load_reviewed_feedback(feedback_store, REVIEW_MANIFEST_PATH)
+            if REVIEW_MANIFEST_PATH.is_file()
+            else None
+        )
+    except (OSError, ValueError, FeedbackStorageError) as exc:
+        reviewed = None
+        st.error(f"Reviewed-data eligibility could not be checked: {exc}")
+    eligible_examples = list(reviewed.examples) if reviewed is not None else []
+    class_counts = {
+        label: sum(example.label == label for example in eligible_examples)
+        for label in ("potential_distress", "no_sufficient_distress_evidence")
+    }
+    training_block_reason = reviewed_training_block_reason(eligible_examples)
+    demo_class_counts = {
+        label: sum(
+            example.training_label == label
+            for example in demo_training_dataset.examples
+        )
+        for label in sorted(DEMO_TRAINING_LABELS)
+    }
+    st.caption(
+        "Separate demo-training dataset from explicitly reviewed, persisted feedback: "
+        f"{len(demo_training_dataset.examples)} eligible; "
+        f"{len(demo_training_dataset.ineligible_reasons)} reviewed row(s) excluded "
+        f"by validation. Class counts: {demo_class_counts}. Demo labels are manual "
+        "and unverified; this dataset is not used by the v2 reviewed-data loader."
+    )
+    if not REVIEW_MANIFEST_PATH.is_file():
+        st.info(
+            "Training blocked: there is no v2 review manifest. Feedback actions alone "
+            "cannot supply labels."
+        )
+    elif not eligible_examples:
+        st.info(
+            "Training blocked: no genuinely approved, eligible reviewed examples are available."
+        )
+    elif training_block_reason:
+        st.info(f"Training blocked: {training_block_reason} Current class counts: {class_counts}.")
+    else:
+        st.write(f"Eligible reviewed examples by label: {class_counts}")
+
+    reviewed_train_clicked = st.button(
+        "Train / Personalize from reviewed data",
+        key="train_reviewed_personalization",
+        disabled=training_block_reason is not None,
+    )
+    if reviewed_train_clicked:
+        try:
+            result = run_reviewed_personalization(
+                feedback_store,
+                REVIEW_MANIFEST_PATH,
+                PERSONALIZATION_DIRECTORY,
+            )
+            st.session_state.personalization_result = result
+        except (OSError, ValueError, FeedbackStorageError) as exc:
+            st.error(f"Personalization did not run: {exc}")
+
+    st.warning(
+        "**DEMO/SYNTHETIC ONLY:** this deterministic experiment demonstrates the "
+        "training mechanism; it is not real-user personalization or evidence of "
+        "real-world distress-detection performance. Synthetic data stays separate "
+        "from reviewed feedback and live monitoring."
+    )
+    if st.button(
+        "Run DEMO/SYNTHETIC ONLY experiment",
+        key="train_synthetic_personalization",
+    ):
+        try:
+            st.session_state.synthetic_personalization_result = (
+                run_synthetic_personalization_demo(PERSONALIZATION_DIRECTORY)
+            )
+        except (OSError, ValueError) as exc:
+            st.error(f"Synthetic demonstration did not run: {exc}")
+
+    for result_key in (
+        "personalization_result",
+        "synthetic_personalization_result",
+    ):
+        result = st.session_state.get(result_key)
+        if not isinstance(result, PersonalizationResult):
+            continue
+        if result.data_mode != "reviewed":
+            st.info("Result type: **DEMO/SYNTHETIC ONLY**.")
+        st.write(
+            f"Samples: {result.sample_count} · class counts: {result.class_counts} · "
+            f"training: {result.training_sample_count} · "
+            f"held out: {result.held_out_sample_count}"
+        )
+        st.write(f"Model version: `{result.model_version}`")
+        st.write("Held-out baseline metrics:")
+        st.json(result.before_metrics)
+        st.write("Held-out personalized metrics:")
+        st.json(result.after_metrics)
+        st.caption(
+            f"New isolated artifact: `{result.artifact_path}`. Run metadata: "
+            f"`{result.run_metadata_path}`. It was not activated by live inference."
+        )
+
+
+st.title("Autism Distress Companion")
 st.caption(
     "Local device checks, continuous multimodal monitoring, background rule-cue evaluation, "
     "and non-clinical alert-state management. Raw audio and video are not stored."
@@ -323,10 +886,20 @@ if "feedback_store" not in st.session_state:
     st.session_state.feedback_store = FeedbackStore()
 if "feedback_message" not in st.session_state:
     st.session_state.feedback_message = None
+if "feedback_message_kind" not in st.session_state:
+    st.session_state.feedback_message_kind = None
+if "feedback_message_target" not in st.session_state:
+    st.session_state.feedback_message_target = None
 if "score_alert_was_active" not in st.session_state:
     st.session_state.score_alert_was_active = False
+if "score_popup_feedback_context" not in st.session_state:
+    st.session_state.score_popup_feedback_context = None
+if "score_popup_feedback_result" not in st.session_state:
+    st.session_state.score_popup_feedback_result = None
 if "missed_event_idempotency_key" not in st.session_state:
     st.session_state.missed_event_idempotency_key = str(uuid.uuid4())
+if "missed_event_submitted" not in st.session_state:
+    st.session_state.missed_event_submitted = False
 if "camera_message" not in st.session_state:
     st.session_state.camera_message = "Not tested yet."
 if "camera_available" not in st.session_state:
@@ -372,55 +945,9 @@ device_tests_disabled = bool(
 
 
 @st.fragment(run_every=LIVE_DASHBOARD_REFRESH_SECONDS)
-def render_monitoring_panel() -> None:
-    render_started_at = time.perf_counter()
-    previous_render_ms = st.session_state.get("monitoring_panel_render_ms")
-    worker_snapshot = {}
-    inference = None
-    inference_timestamp = None
-    inference_age = None
-    inference_stale = False
-    inference_error = None
-    inference_metadata = None
-    detection_mode = "model"
-    rule_based = False
-
-    monitoring_manager_for_tests = st.session_state.monitoring_manager
-    device_tests_disabled = bool(
-        monitoring_manager_for_tests is not None
-        and (
-            monitoring_manager_for_tests.is_running
-            or monitoring_manager_for_tests.status == "stopping"
-        )
-    )
+def _render_distress_score_and_threshold() -> None:
     manager = st.session_state.monitoring_manager
-    if manager is None:
-        status = "stopped"
-        message = "Monitoring is idle; start to process camera and microphone signals."
-        snapshot = {}
-        inference = None
-        inference_timestamp = None
-        alert = st.session_state.alert_manager.report_unknown(
-            "Monitoring is stopped; no fresh inference is being produced."
-        )
-        rule_based = False
-    else:
-        snapshot = manager.snapshot()
-        status = snapshot.get("status", "stopped")
-        message = snapshot.get("message", "Monitoring is running.")
-        inference = snapshot.get("latest_inference")
-        inference_timestamp = snapshot.get("latest_inference_timestamp")
-        alert = snapshot.get("latest_alert")
-        metadata = getattr(inference, "metadata", None) if inference is not None else None
-        rule_based = isinstance(metadata, dict) and metadata.get("detection_mode") == "rule_based"
-    _render_current_distress_status(
-        status=status,
-        message=message,
-        inference=inference,
-        alert=alert,
-        rule_based=rule_based,
-        inference_timestamp=inference_timestamp,
-    )
+    snapshot = manager.snapshot() if manager is not None else {}
 
     score_result = calculate_distress_score(
         snapshot,
@@ -497,7 +1024,30 @@ def render_monitoring_panel() -> None:
     )
     st.session_state.score_alert_was_active = score_alert_was_active
     if popup_message:
-        show_alert_popup(popup_message)
+        popup_alert_id = str(uuid.uuid4())
+        popup_evidence = build_fusion_evidence(snapshot)
+        score_snapshot_record = (
+            evidence_to_feature_record(
+                popup_evidence,
+                provenance={"source": "monitoring_diagnostic_snapshot"},
+            )
+            if popup_evidence.has_data
+            else None
+        )
+        popup_record, popup_provenance_available = (
+            record_for_score_snapshot(snapshot, score_snapshot_record)
+            if score_snapshot_record is not None
+            else (None, False)
+        )
+        st.session_state.score_popup_feedback_context = (
+            alert_feedback_context_for_snapshot(
+                popup_alert_id,
+                popup_record,
+                provenance_available=popup_provenance_available,
+            )
+        )
+        st.session_state.score_popup_feedback_result = None
+        show_alert_popup(popup_message, popup_alert_id)
 
     st.subheader("Multimodal Distress Alert")
     st.caption(
@@ -521,6 +1071,90 @@ def render_monitoring_panel() -> None:
     score_alert_columns[1].metric(
         "Configured alert threshold",
         f"{EXPERIMENTAL_DISTRESS_ALERT_THRESHOLD:g}/100",
+    )
+
+
+def _render_monitoring_controls() -> None:
+    st.subheader("Monitoring controls")
+    st.caption(
+        "Sensors and rule-cue evaluation run in the background. This dashboard refreshes "
+        "about every 1.5 seconds. Rule settings are not clinically validated."
+    )
+    previous_render_ms = st.session_state.get("monitoring_panel_render_ms")
+    if previous_render_ms is not None:
+        st.caption(
+            f"Previous monitoring-panel render time: {previous_render_ms:.1f} ms "
+            "(measured on the prior dashboard refresh)."
+        )
+
+    manager = st.session_state.monitoring_manager
+    start_column, stop_column = st.columns(2)
+    with start_column:
+        if st.button(
+            "Start monitoring",
+            use_container_width=True,
+            type="primary",
+        ):
+            if manager is None:
+                manager = create_monitoring_manager(st.session_state.alert_manager)
+                st.session_state.monitoring_manager = manager
+            manager.start()
+            st.rerun(scope="app")
+    with stop_column:
+        if st.button("Stop monitoring", use_container_width=True):
+            if manager is not None:
+                manager.stop()
+            st.rerun(scope="app")
+
+
+@st.fragment(run_every=LIVE_DASHBOARD_REFRESH_SECONDS)
+def render_monitoring_panel() -> None:
+    render_started_at = time.perf_counter()
+    worker_snapshot = {}
+    inference = None
+    inference_timestamp = None
+    inference_stale = False
+    inference_error = None
+    inference_metadata = None
+    detection_mode = "model"
+    rule_based = False
+
+    monitoring_manager_for_tests = st.session_state.monitoring_manager
+    device_tests_disabled = bool(
+        monitoring_manager_for_tests is not None
+        and (
+            monitoring_manager_for_tests.is_running
+            or monitoring_manager_for_tests.status == "stopping"
+        )
+    )
+
+    manager = st.session_state.monitoring_manager
+    if manager is None:
+        status = "stopped"
+        message = "Monitoring is idle; start to process camera and microphone signals."
+        snapshot = {}
+        inference = None
+        inference_timestamp = None
+        alert = st.session_state.alert_manager.report_unknown(
+            "Monitoring is stopped; no fresh inference is being produced."
+        )
+        rule_based = False
+    else:
+        snapshot = manager.snapshot()
+        status = snapshot.get("status", "stopped")
+        message = snapshot.get("message", "Monitoring is running.")
+        inference = snapshot.get("latest_inference")
+        inference_timestamp = snapshot.get("latest_inference_timestamp")
+        alert = snapshot.get("latest_alert")
+        metadata = getattr(inference, "metadata", None) if inference is not None else None
+        rule_based = isinstance(metadata, dict) and metadata.get("detection_mode") == "rule_based"
+    _render_current_distress_status(
+        status=status,
+        message=message,
+        inference=inference,
+        alert=alert,
+        rule_based=rule_based,
+        inference_timestamp=inference_timestamp,
     )
 
     st.subheader("Monitoring and Sensors")
@@ -587,18 +1221,6 @@ def render_monitoring_panel() -> None:
         else:
             st.caption(f"Test: {st.session_state.microphone_test_message}")
 
-    st.divider()
-    st.subheader("Monitoring controls")
-    st.caption(
-        "Sensors and rule-cue evaluation run in the background. This dashboard refreshes "
-        "about every 1.5 seconds. Rule settings are not clinically validated."
-    )
-    if previous_render_ms is not None:
-        st.caption(
-            f"Previous monitoring-panel render time: {previous_render_ms:.1f} ms "
-            "(measured on the prior dashboard refresh)."
-        )
-
     manager = st.session_state.monitoring_manager
     if manager is None:
         status = "stopped"
@@ -645,20 +1267,6 @@ def render_monitoring_panel() -> None:
         snapshot = manager.snapshot()
         status = snapshot["status"]
         message = snapshot["message"]
-
-    start_column, stop_column = st.columns(2)
-    with start_column:
-        if st.button("Start monitoring", use_container_width=True):
-            if manager is None:
-                manager = create_monitoring_manager(st.session_state.alert_manager)
-                st.session_state.monitoring_manager = manager
-            manager.start()
-            st.rerun(scope="app")
-    with stop_column:
-        if st.button("Stop monitoring", use_container_width=True):
-            if manager is not None:
-                manager.stop()
-            st.rerun(scope="app")
 
     if status == "running":
         st.success(f"Monitoring: RUNNING — {message}")
@@ -1017,6 +1625,9 @@ def render_monitoring_panel() -> None:
         provenance={"source": "live_monitoring"},
     )
     worker_snapshot = manager.snapshot() if manager is not None else {}
+    alert_feedback_context = retained_alert_feedback_context(
+        worker_snapshot.get("alert_feature_record")
+    )
     inference = (
         worker_snapshot.get("latest_inference")
         if status == "running"
@@ -1477,72 +2088,151 @@ def render_monitoring_panel() -> None:
         st.write("Live inference: **NOT RUNNING**")
         st.write("Live model score: **Unavailable**")
         st.info(f"Alert state: UNKNOWN — {alert.reason}")
-    if inference is not None:
-        limitations = inference.metadata.get("limitations")
-        if limitations:
-            st.caption(str(limitations))
 
-    feedback_store = st.session_state.feedback_store
-    feedback_record = worker_snapshot.get("latest_feature_record") or feature_record
-    if (
-        not inference_stale
-        and alert is not None
-        and alert.state == "potential_distress"
-        and alert.alert_id
-    ):
+    if alert_feedback_context is not None:
+        st.subheader("Feedback for this Alert")
+        st.caption(
+            f"Alert ID: {alert_feedback_context.alert_id} · "
+            f"Triggered: {alert_feedback_context.alert.activated_at_utc or 'timestamp unavailable'}"
+        )
+        if alert_feedback_context.record is None:
+            st.warning(
+                "The alert's triggering feature snapshot is unavailable; "
+                "confirmation and rejection are disabled."
+            )
         feedback_left, feedback_right = st.columns(2)
         with feedback_left:
-            if st.button("Confirm alert", key="feedback_confirm_alert"):
+            if st.button(
+                "Confirm",
+                key=f"feedback_confirm_{alert_feedback_context.alert_id}",
+                disabled=alert_feedback_context.record is None,
+            ):
                 try:
-                    result = feedback_store.submit(
+                    result = submit_alert_feedback(
+                        st.session_state.feedback_store,
+                        alert_feedback_context,
                         "confirm_alert",
-                        idempotency_key=f"{alert.alert_id}:confirm",
-                        alert_id=alert.alert_id,
-                        record=feedback_record,
                     )
                     st.session_state.feedback_message = (
                         "Confirmation saved locally."
                         if result.inserted
                         else "This confirmation was already saved."
                     )
-                except FeedbackStorageError as exc:
-                    st.session_state.feedback_message = f"Feedback storage failed: {exc}"
+                    st.session_state.feedback_message_kind = "alert"
+                    st.session_state.feedback_message_target = (
+                        f"alert:{alert_feedback_context.alert_id}"
+                    )
+                    st.rerun()
+                except (FeedbackStorageError, ValueError) as exc:
+                    st.session_state.feedback_message = (
+                        f"Feedback storage failed: {exc}"
+                    )
+                    st.session_state.feedback_message_kind = "alert"
+                    st.session_state.feedback_message_target = (
+                        f"alert:{alert_feedback_context.alert_id}"
+                    )
         with feedback_right:
-            if st.button("Reject alert", key="feedback_reject_alert"):
+            if st.button(
+                "Reject",
+                key=f"feedback_reject_{alert_feedback_context.alert_id}",
+                disabled=alert_feedback_context.record is None,
+            ):
                 try:
-                    result = feedback_store.submit(
+                    result = submit_alert_feedback(
+                        st.session_state.feedback_store,
+                        alert_feedback_context,
                         "reject_alert",
-                        idempotency_key=f"{alert.alert_id}:reject",
-                        alert_id=alert.alert_id,
-                        record=feedback_record,
                     )
                     st.session_state.feedback_message = (
                         "Rejection saved locally."
                         if result.inserted
                         else "This rejection was already saved."
                     )
-                except FeedbackStorageError as exc:
-                    st.session_state.feedback_message = f"Feedback storage failed: {exc}"
-    if st.button("Report missed event", key="feedback_missed_event"):
+                    st.session_state.feedback_message_kind = "alert"
+                    st.session_state.feedback_message_target = (
+                        f"alert:{alert_feedback_context.alert_id}"
+                    )
+                    st.rerun()
+                except (FeedbackStorageError, ValueError) as exc:
+                    st.session_state.feedback_message = (
+                        f"Feedback storage failed: {exc}"
+                    )
+                    st.session_state.feedback_message_kind = "alert"
+                    st.session_state.feedback_message_target = (
+                        f"alert:{alert_feedback_context.alert_id}"
+                    )
+        if (
+            st.session_state.feedback_message_kind == "alert"
+            and st.session_state.feedback_message_target
+            == f"alert:{alert_feedback_context.alert_id}"
+        ):
+            if st.session_state.feedback_message.startswith(
+                "Feedback storage failed:"
+            ):
+                st.error(st.session_state.feedback_message)
+            else:
+                st.success(st.session_state.feedback_message)
+
+    st.subheader("Report a Missed Event")
+    st.caption(
+        "For a caregiver who observed an event that the detector did not alert on."
+    )
+    latest_feedback_record = worker_snapshot.get("latest_feature_record")
+    missed_snapshot_is_current = (
+        latest_feedback_record is not None
+        and inference_timestamp is not None
+        and 0.0 <= time.monotonic() - float(inference_timestamp) <= 3.0
+    )
+    missed_feedback_record = latest_feedback_record or feature_record
+    if st.button(
+        "Report Missed Event",
+        key="feedback_missed_event",
+        disabled=st.session_state.missed_event_submitted,
+    ):
         try:
-            result = feedback_store.submit(
+            result = st.session_state.feedback_store.submit(
                 "missed_event",
                 idempotency_key=st.session_state.missed_event_idempotency_key,
-                record=feature_record,
+                record=missed_feedback_record,
+                provenance_available=missed_snapshot_is_current,
             )
             st.session_state.feedback_message = (
                 "Missed event saved locally."
                 if result.inserted
                 else "This missed-event report was already saved."
             )
-            st.session_state.missed_event_idempotency_key = str(uuid.uuid4())
+            st.session_state.feedback_message_kind = "missed"
+            st.session_state.feedback_message_target = "missed"
+            st.session_state.missed_event_submitted = True
+            st.rerun()
         except FeedbackStorageError as exc:
             st.session_state.feedback_message = f"Feedback storage failed: {exc}"
-    if st.session_state.feedback_message:
-        if st.session_state.feedback_message.startswith("Feedback storage failed:"):
+            st.session_state.feedback_message_kind = "missed"
+            st.session_state.feedback_message_target = "missed"
+    if st.session_state.missed_event_submitted and st.button(
+        "Start another missed-event report",
+        key="feedback_new_missed_event",
+    ):
+        st.session_state.missed_event_idempotency_key = str(uuid.uuid4())
+        st.session_state.missed_event_submitted = False
+        st.session_state.feedback_message = None
+        st.session_state.feedback_message_kind = None
+        st.session_state.feedback_message_target = None
+    if (
+        st.session_state.feedback_message_kind == "missed"
+        and st.session_state.feedback_message_target == "missed"
+    ):
+        if st.session_state.feedback_message.startswith(
+            "Feedback storage failed:"
+        ):
             st.error(st.session_state.feedback_message)
         else:
             st.success(st.session_state.feedback_message)
+
+    if inference is not None:
+        limitations = inference.metadata.get("limitations")
+        if limitations:
+            st.caption(str(limitations))
 
     st.subheader("Recent Events")
     st.caption(
@@ -1623,6 +2313,12 @@ def render_monitoring_panel() -> None:
     else:
         st.info("No live alert-decision diagnostics have been recorded in this session.")
 
+    st.session_state.monitoring_panel_render_ms = (
+        time.perf_counter() - render_started_at
+    ) * 1000.0
+
+
+def _render_simulated_caretaker_workflow_demo() -> None:
     st.subheader("Simulated caretaker workflow demo")
     st.warning(
         "SIMULATED ONLY: this control creates an immediate demo alert. It does not "
@@ -1676,11 +2372,20 @@ def render_monitoring_panel() -> None:
                 f"{feedback['alert_id']}; not persisted."
             )
 
-    st.session_state.monitoring_panel_render_ms = (
-        time.perf_counter() - render_started_at
-    ) * 1000.0
 
+_render_monitoring_controls()
+
+st.divider()
+_render_distress_score_and_threshold()
+
+st.divider()
+_render_feedback_history_and_personalization()
+
+st.divider()
 render_monitoring_panel()
+
+st.divider()
+_render_simulated_caretaker_workflow_demo()
 
 st.divider()
 st.subheader("Audio-feature test")

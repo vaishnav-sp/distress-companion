@@ -240,14 +240,66 @@ local SQLite database at `~/.distress_companion/feedback.sqlite3` (Windows:
 `%USERPROFILE%\\.distress_companion\\feedback.sqlite3`). Feedback includes only
 an alert reference when applicable, numerical feature values with validity
 flags, unavailable-feature reasons, and limited feature-record provenance.
-Missing values remain null and invalid; no measurements are invented. A missed
-event is stored with its own `missed_event` action and no alert ID. It stores no
-names, personal identifiers, images, audio, or video. Idempotency keys prevent
+Where available, provenance includes the immutable snapshot ID, original
+feature-record creation time, and per-modality source timestamps. Confirm and
+Reject reference the exact feature snapshot captured when that alert activated,
+not a later dashboard snapshot. Report Missed Event references the current
+captured snapshot when it can be established; otherwise provenance is marked
+unavailable and the record cannot be approved for training. Missing values
+remain null and invalid; no measurements are invented. A missed event is
+stored with its own `missed_event` action and no alert ID. It stores no names,
+personal identifiers, images, audio, or video. Idempotency keys prevent
 duplicate submissions across reruns, and the `FeedbackStore.list_feedback()`
-interface retrieves saved records after reopening the database. Feedback is
-stored for later review but is not consumed by training or personalization;
-submitting feedback does not change the running detector or model. Model
-training remains a separate explicit workflow using reviewed, labeled records.
+interface retrieves saved records after reopening the database using a
+read-only SQLite connection (it does not create a database, table, or directory
+when none exists). The dashboard's Feedback History table hides alert IDs,
+feedback IDs, snapshot IDs, and raw feature vectors. It displays separate
+review status, demonstration label, persisted-provenance status, and
+training-eligibility columns.
+
+For the local academic demonstration, select a feedback row, choose
+`potential_distress` or `no_sufficient_distress_evidence`, and click **Save
+Review**. The chosen label is manually assigned and is not independently
+verified ground truth. It is saved once per feedback row in an append-only
+demo sidecar at `~/.distress_companion/demo_feedback_reviews.jsonl` (Windows:
+`%USERPROFILE%\\.distress_companion\\demo_feedback_reviews.jsonl`). Set
+`DISTRESS_DEMO_REVIEW_FILE` before launching Streamlit to choose another private
+local path. No IDs need to be copied and no reference configuration is
+required. The feedback row and its persisted snapshot are not modified.
+Confirm, Reject, and Report Missed Event remain actions, not labels.
+
+Demo reviews are intentionally separate from the v2 training manifest and
+loader. A manually labeled row enters the separate demo-training dataset only
+when the stored feedback ID is unique, its complete persisted snapshot
+provenance validates, the schema and feature values/validity flags pass the
+existing evidence-sufficiency policy, and the snapshot is not duplicated by
+another demo review. The table labels such rows **Eligible for demo training
+only (manual label; unverified)**; failures remain ineligible with a specific
+validation reason. These labels are not independently verified ground truth.
+The separate v2 manifest, when used for reviewed-data training, remains at
+`~/.distress_companion/review_manifest_v2.jsonl` (Windows:
+`%USERPROFILE%\\.distress_companion\\review_manifest_v2.jsonl`); set
+`DISTRESS_REVIEW_MANIFEST` to override it. It retains its required reviewer and
+evidence-context references, complete provenance validation, and explicit
+review requirements. Demo labels never satisfy v2 review requirements or make
+an entry eligible in the v2 loader. The application does not assert independent
+reviewer verification for demo labels.
+
+**Train / Personalize** is a separate offline action. It loads only entries
+accepted by the existing reviewed-feedback loader, requires at least four
+examples of each explicit label to reserve a held-out set, and saves a new
+versioned fusion-head artifact and run metadata under
+`~/.distress_companion/personalized_models` (Windows:
+`%USERPROFILE%\\.distress_companion\\personalized_models`). Override the output
+directory with `DISTRESS_PERSONALIZATION_DIR`. It reports before/after
+held-out metrics and does not activate the artifact or modify live alerts.
+Since this project currently has no valid local v2 review manifest, genuine
+reviewed-data training remains blocked until qualifying records are explicitly
+reviewed. The separately labeled **DEMO/SYNTHETIC ONLY** button runs a
+deterministic infrastructure experiment using `federated/virtual_students.py`
+and the existing fusion-head implementation; synthetic samples and artifacts
+remain separate from reviewed data and are not evidence of distress-detection
+performance.
 
 To train the multimodal fusion model, first prepare a UTF-8 JSONL file containing
 one complete serialized `FeatureRecord` per line plus an explicit ground-truth
@@ -324,19 +376,19 @@ identity; the independent-review process must be enforced locally.
 
 Create a local UTF-8 JSONL manifest with one object per reviewed feedback ID.
 For each approved entry, include `manifest_version` set to
-`phase4-reviewed-feedback-manifest-v1`, `feedback_id`, `review_decision`,
-`training_label`, timezone-aware `reviewed_at_utc`,
+`phase4-reviewed-feedback-manifest-v2`, `feedback_id`, the exact stored
+`snapshot_id`, `review_decision`, `training_label`, timezone-aware `reviewed_at_utc`,
 `event_window_start_utc`, `event_window_end_utc`,
 `modality_timestamps_utc` for exactly the modalities with valid features, and an
-opaque `evidence_context_reference`. The event-window and modality timestamps
-must be copied from independently verified local evidence; a reference string
-does not itself verify them. Every modality timestamp must be in the window and
-within the fixed 3-second window-end freshness limit. Keep manifests in a
-local-only location, not in a shared/synchronized folder. The feedback store
-currently does not capture event-window or modality timestamps, so existing
-feedback cannot pass this gate unless that context is independently available
-and explicitly entered; the loader reports missing context instead of inventing
-it. The loader also rejects incompatible schemas, non-finite/malformed values,
+opaque `evidence_context_reference`. The event-window bounds must exactly span
+the per-modality source timestamps persisted with that snapshot. Reviewed
+timestamps must match those stored values and are checked against their
+recorded monotonic-clock anchor; a reference string does not itself verify an
+event. Every modality timestamp must be in the window and within the fixed
+3-second window-end freshness limit. Keep manifests in a local-only location,
+not in a shared/synchronized folder. Legacy feedback remains readable from the
+store but has no trusted snapshot provenance and cannot pass review eligibility.
+The loader also rejects incompatible schemas, non-finite/malformed values,
 fewer than four valid features, fewer than two available modalities, duplicate
 manifest entries, and unsupported fields. Exported training records contain
 only numerical features, validity flags, explicit labels, and limited review

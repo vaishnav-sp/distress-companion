@@ -40,3 +40,18 @@ tmp/
 # Uncomment the line above only if you intentionally want to exclude all models.# Local training dataset
 federated/output/
 data/raw/autism_emotion_dataset/
+
+# Local feedback and review data
+demo_feedback_reviews.jsonl
+review_manifest_v2.jsonl
+*.sqlite
+*.sqlite3
+*.db
+
+# Local datasets and archives
+data/aktives dataset/
+data/**/aktives dataset/
+*.zip
+
+# Generated local research reports
+research/aktives/reports/data_quality_report.json

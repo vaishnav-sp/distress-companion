@@ -17,15 +17,23 @@ from training.fusion_head import (
     load_fusion_head,
     save_fusion_head,
 )
+from training.personalization_demo import (
+    run_reviewed_personalization,
+    run_synthetic_personalization_demo,
+)
 from training.prepare_reviewed_feedback import main as prepare_reviewed_feedback_cli
 from training.reviewed_feedback import (
     REVIEW_MANIFEST_VERSION,
+    append_review_entry,
+    feedback_review_block_reason,
+    feedback_review_statuses,
     load_reviewed_feedback,
     write_reviewed_examples,
 )
 
 
 def _record(
+    snapshot_id="review-test-snapshot",
     valid_features=(
         "face.expression_angry",
         "face.expression_fear",
@@ -40,6 +48,20 @@ def _record(
         for index, name in enumerate(names)
     }
     validity = {name: name in valid_names for name in names}
+    created_at = datetime.now(timezone.utc)
+    anchor_utc = created_at - timedelta(milliseconds=10)
+    anchor_monotonic = 100.0
+    source_timestamps_monotonic = {
+        "face": anchor_monotonic - 0.2,
+        "behavior": anchor_monotonic - 0.1,
+    }
+    source_timestamps_utc = {
+        modality: (
+            anchor_utc
+            + timedelta(seconds=timestamp - anchor_monotonic)
+        ).isoformat()
+        for modality, timestamp in source_timestamps_monotonic.items()
+    }
     return FeatureRecord(
         schema_version=FEATURE_SCHEMA_VERSION,
         feature_names=names,
@@ -52,14 +74,24 @@ def _record(
         },
         modality_status={"face": "ok", "behavior": "ok", "audio": "waiting"},
         modality_messages={"face": "", "behavior": "", "audio": ""},
-        provenance={"source": "live_monitoring"},
+        provenance={
+            "source": "live_rule_based_monitoring",
+            "snapshot_id": snapshot_id,
+            "source_timestamp_clock": "monotonic",
+            "source_timestamp_anchor_utc": anchor_utc.isoformat(),
+            "source_timestamp_anchor_monotonic": anchor_monotonic,
+            "source_timestamps_monotonic": source_timestamps_monotonic,
+            "source_timestamps_utc": source_timestamps_utc,
+        },
+        created_at_utc=created_at.isoformat(),
     )
 
 
 def _submit(store, action="missed_event"):
+    idempotency_key = f"test-{action}-{len(store.list_feedback())}"
     options = {
-        "idempotency_key": f"test-{action}-{len(store.list_feedback())}",
-        "record": _record(),
+        "idempotency_key": idempotency_key,
+        "record": _record(snapshot_id=idempotency_key),
     }
     if action in {"confirm_alert", "reject_alert"}:
         options["alert_id"] = f"alert-{action}"
@@ -76,22 +108,20 @@ def _timestamp(value):
 
 
 def _manifest(feedback, *, label="potential_distress", **updates):
-    submitted_at = _timestamp(feedback["submitted_at_utc"])
-    window_end = submitted_at - timedelta(milliseconds=250)
-    window_start = window_end - timedelta(seconds=1)
-    modality_timestamps = {
-        "face": (window_end - timedelta(milliseconds=100)).isoformat(),
-        "behavior": (window_end - timedelta(milliseconds=200)).isoformat(),
-    }
+    summary = json.loads(feedback["feature_summary_json"])
+    provenance = summary["provenance"]
+    modality_timestamps = provenance["source_timestamps_utc"]
+    source_times = [_timestamp(value) for value in modality_timestamps.values()]
     item = {
         "manifest_version": REVIEW_MANIFEST_VERSION,
         "feedback_id": feedback["feedback_id"],
+        "snapshot_id": provenance["snapshot_id"],
         "review_decision": "approved_for_training",
         "reviewer_reference": "reviewer-local-1",
         "training_label": label,
         "reviewed_at_utc": datetime.now(timezone.utc).isoformat(),
-        "event_window_start_utc": window_start.isoformat(),
-        "event_window_end_utc": window_end.isoformat(),
+        "event_window_start_utc": min(source_times).isoformat(),
+        "event_window_end_utc": max(source_times).isoformat(),
         "modality_timestamps_utc": modality_timestamps,
         "evidence_context_reference": "local-event-42",
     }
@@ -135,12 +165,41 @@ def test_explicitly_reviewed_eligible_example_preserves_action_and_numerical_val
     assert example.label == "no_sufficient_distress_evidence"
     assert example.feedback_provenance["feedback_action"] == "missed_event"
     assert example.feedback_provenance["alert_id"] is None
-    assert example.record.created_at_utc is None
+    assert example.record.created_at_utc == json.loads(
+        feedback["feature_summary_json"]
+    )["created_at_utc"]
+    assert example.feedback_provenance["snapshot_id"] == manifest["snapshot_id"]
     assert example.record.provenance["review_decision"] == "approved_for_training"
     exported = example.to_training_record()
     assert exported["feature_values"]["face.expression_angry"] == 0.1
     assert "raw_image" not in json.dumps(exported).lower()
     assert "raw_audio" not in json.dumps(exported).lower()
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["confirm_alert", "reject_alert", "missed_event"],
+)
+def test_each_feedback_action_keeps_its_explicitly_reviewed_snapshot(
+    tmp_path, action
+):
+    store = FeedbackStore(tmp_path / f"{action}.sqlite3")
+    feedback = _submit(store, action)
+    manifest = _manifest(feedback, label="potential_distress")
+
+    result = load_reviewed_feedback(
+        store,
+        _manifest_file(tmp_path / f"{action}.jsonl", manifest),
+    )
+
+    assert len(result.examples) == 1
+    example = result.examples[0]
+    assert example.feedback_id == feedback["feedback_id"]
+    assert example.feedback_provenance["feedback_action"] == action
+    assert example.feedback_provenance["snapshot_id"] == manifest["snapshot_id"]
+    assert example.feedback_provenance["event_window_start_utc"] == (
+        manifest["event_window_start_utc"]
+    )
 
 
 @pytest.mark.parametrize("action", ["confirm_alert", "reject_alert", "missed_event"])
@@ -175,24 +234,76 @@ def test_missing_window_or_freshness_context_is_rejected(tmp_path, field, value,
 
     assert not result.examples
     assert reason in result.rejections[0].reason
+    status = feedback_review_statuses(store, path)[feedback["feedback_id"]]
+    assert status.training_eligibility == "Not eligible"
 
 
-def test_stale_modality_timestamp_is_rejected(tmp_path):
+def test_mismatched_modality_timestamp_is_rejected(tmp_path):
     store = FeedbackStore(tmp_path / "feedback.sqlite3")
     feedback = _submit(store)
     manifest = _manifest(feedback)
-    window_end = _timestamp(manifest["event_window_end_utc"])
-    manifest["event_window_start_utc"] = (
-        window_end - timedelta(seconds=5)
-    ).isoformat()
     manifest["modality_timestamps_utc"]["face"] = (
-        window_end - timedelta(seconds=4)
+        _timestamp(manifest["modality_timestamps_utc"]["face"])
+        + timedelta(milliseconds=1)
     ).isoformat()
 
     result = load_reviewed_feedback(store, _manifest_file(tmp_path / "review.jsonl", manifest))
 
     assert not result.examples
-    assert "freshness limit" in result.rejections[0].reason
+    assert "does not match the stored feature snapshot" in result.rejections[0].reason
+
+
+def test_reviewed_event_window_must_exactly_span_persisted_source_times(tmp_path):
+    store = FeedbackStore(tmp_path / "feedback.sqlite3")
+    feedback = _submit(store)
+    manifest = _manifest(feedback)
+    manifest["event_window_start_utc"] = (
+        _timestamp(manifest["event_window_start_utc"]) - timedelta(milliseconds=1)
+    ).isoformat()
+
+    result = load_reviewed_feedback(store, _manifest_file(tmp_path / "review.jsonl", manifest))
+
+    assert not result.examples
+    assert "exactly span the persisted modality timestamps" in result.rejections[0].reason
+
+
+def test_legacy_feedback_remains_readable_but_is_not_training_eligible(tmp_path):
+    store = FeedbackStore(tmp_path / "feedback.sqlite3")
+    feedback = _submit(store)
+    manifest = _manifest(feedback)
+
+    _rewrite_summary(
+        store,
+        feedback,
+        lambda payload: (
+            payload.pop("created_at_utc"),
+            payload.__setitem__("provenance", {"source": "live_monitoring"}),
+        ),
+    )
+    legacy_row = store.list_feedback()[0]
+    result = load_reviewed_feedback(
+        store,
+        _manifest_file(tmp_path / "review.jsonl", manifest),
+    )
+
+    assert legacy_row["feedback_id"] == feedback["feedback_id"]
+    assert not result.examples
+    assert "provenance is unavailable" in result.rejections[0].reason
+
+
+def test_legacy_review_manifest_version_is_not_eligible(tmp_path):
+    store = FeedbackStore(tmp_path / "feedback.sqlite3")
+    feedback = _submit(store)
+    manifest = _manifest(feedback)
+    manifest["manifest_version"] = "phase4-reviewed-feedback-manifest-v1"
+
+    result = load_reviewed_feedback(
+        store,
+        _manifest_file(tmp_path / "review.jsonl", manifest),
+    )
+
+    assert not result.examples
+    assert "manifest-v2" in result.rejections[0].reason
 
 
 @pytest.mark.parametrize(
@@ -418,3 +529,291 @@ def test_manifest_rejects_unapproved_extra_fields_that_could_carry_media(tmp_pat
 
     assert not result.examples
     assert any("unsupported fields" in rejection.reason for rejection in result.rejections)
+
+
+def test_feedback_history_reads_do_not_create_or_modify_local_data(tmp_path):
+    database_path = tmp_path / "private" / "feedback.sqlite3"
+    store = FeedbackStore(database_path)
+
+    assert store.list_feedback() == []
+    assert feedback_review_statuses(store, tmp_path / "review.jsonl") == {}
+    assert not database_path.parent.exists()
+
+    feedback = _submit(store)
+    before = database_path.read_bytes()
+    statuses = feedback_review_statuses(store, tmp_path / "review.jsonl")
+
+    assert statuses[feedback["feedback_id"]].status == "Awaiting review"
+    assert database_path.read_bytes() == before
+    assert not (tmp_path / "review.jsonl").exists()
+
+
+def test_review_form_provenance_gate_accepts_complete_row_and_matches_row_id(tmp_path):
+    store = FeedbackStore(tmp_path / "feedback.sqlite3")
+    feedback = _submit(store)
+
+    assert feedback_review_block_reason(feedback, feedback["feedback_id"]) is None
+    assert feedback_review_block_reason(feedback, "different-row") is not None
+
+
+@pytest.mark.parametrize(
+    ("provenance_field", "value", "expected_reason"),
+    [
+        ("provenance_available", False, "provenance flag"),
+        ("snapshot_id", None, "snapshot ID"),
+        ("event_reference_type", "unavailable", "event reference"),
+        ("source_timestamp_clock", "wall_clock", "timestamp clock"),
+        ("source_timestamps_monotonic", {}, "timestamp coverage"),
+        ("source_timestamp_anchor_utc", None, "UTC clock anchor"),
+        ("source_timestamp_anchor_monotonic", None, "monotonic clock anchor"),
+    ],
+)
+def test_review_form_provenance_gate_explains_incomplete_metadata(
+    tmp_path, provenance_field, value, expected_reason
+):
+    store = FeedbackStore(tmp_path / f"{provenance_field}.sqlite3")
+    feedback = _submit(store)
+
+    def mutate(summary):
+        summary["provenance"][provenance_field] = value
+
+    _rewrite_summary(store, feedback, mutate)
+    updated_row = next(
+        row
+        for row in store.list_feedback()
+        if row["feedback_id"] == feedback["feedback_id"]
+    )
+
+    reason = feedback_review_block_reason(
+        updated_row, feedback["feedback_id"]
+    )
+
+    assert reason is not None
+    assert expected_reason in reason
+
+
+def test_review_form_provenance_gate_checks_schema_modality_and_creation_time(tmp_path):
+    store = FeedbackStore(tmp_path / "feedback.sqlite3")
+    feedback = _submit(store)
+
+    def set_schema(summary):
+        summary["schema_version"] = "unsupported-schema"
+
+    _rewrite_summary(store, feedback, set_schema)
+    row = next(
+        item
+        for item in store.list_feedback()
+        if item["feedback_id"] == feedback["feedback_id"]
+    )
+    assert "feature-schema version" in feedback_review_block_reason(
+        row, feedback["feedback_id"]
+    )
+
+    feedback = _submit(store)
+
+    def remove_modality_timestamp(summary):
+        summary["provenance"]["source_timestamps_utc"].pop("face")
+
+    _rewrite_summary(store, feedback, remove_modality_timestamp)
+    row = next(
+        item
+        for item in store.list_feedback()
+        if item["feedback_id"] == feedback["feedback_id"]
+    )
+    assert "timestamp coverage" in feedback_review_block_reason(
+        row, feedback["feedback_id"]
+    )
+
+    feedback = _submit(store)
+
+    def remove_creation_time(summary):
+        summary["created_at_utc"] = None
+
+    _rewrite_summary(store, feedback, remove_creation_time)
+    row = next(
+        item
+        for item in store.list_feedback()
+        if item["feedback_id"] == feedback["feedback_id"]
+    )
+    assert "creation time" in feedback_review_block_reason(
+        row, feedback["feedback_id"]
+    )
+
+
+def test_review_submission_rejects_incomplete_provenance_for_every_decision(tmp_path):
+    store = FeedbackStore(tmp_path / "feedback.sqlite3")
+    feedback = _submit(store)
+    entry = _manifest(feedback)
+    entry["review_decision"] = "excluded"
+
+    def remove_provenance(summary):
+        summary["provenance"]["provenance_available"] = False
+
+    _rewrite_summary(store, feedback, remove_provenance)
+    manifest_path = tmp_path / "review.jsonl"
+
+    with pytest.raises(ValueError, match="provenance flag"):
+        append_review_entry(store, manifest_path, entry)
+    assert not manifest_path.exists()
+
+
+def test_explicit_review_append_is_v2_exact_snapshot_and_duplicate_safe(tmp_path):
+    store = FeedbackStore(tmp_path / "feedback.sqlite3")
+    feedback = _submit(store)
+    manifest_path = tmp_path / "private" / "review.jsonl"
+    entry = _manifest(feedback)
+
+    assert append_review_entry(store, manifest_path, entry) == manifest_path
+    saved_content = manifest_path.read_text(encoding="utf-8")
+    loaded = load_reviewed_feedback(store, manifest_path)
+
+    assert [example.feedback_id for example in loaded.examples] == [
+        feedback["feedback_id"]
+    ]
+    assert loaded.examples[0].feedback_provenance["snapshot_id"] == entry["snapshot_id"]
+    assert feedback_review_statuses(store, manifest_path)[
+        feedback["feedback_id"]
+    ].status == "Approved for training"
+    with pytest.raises(ValueError, match="already exists"):
+        append_review_entry(store, manifest_path, entry)
+    assert manifest_path.read_text(encoding="utf-8") == saved_content
+
+
+def test_feedback_action_without_review_label_is_awaiting_not_training(tmp_path):
+    store = FeedbackStore(tmp_path / "feedback.sqlite3")
+    feedback = _submit(store, "confirm_alert")
+    manifest_path = _manifest_file(tmp_path / "review.jsonl")
+
+    result = load_reviewed_feedback(store, manifest_path)
+
+    assert not result.examples
+    assert any("action is not a training label" in item.reason for item in result.rejections)
+    assert feedback_review_statuses(store, manifest_path)[
+        feedback["feedback_id"]
+    ].status == "Awaiting review"
+
+
+def test_invalid_persisted_review_is_shown_as_ineligible(tmp_path):
+    store = FeedbackStore(tmp_path / "feedback.sqlite3")
+    feedback = _submit(store)
+    entry = _manifest(feedback)
+    entry["training_label"] = "confirm_alert"
+    manifest_path = _manifest_file(tmp_path / "review.jsonl", entry)
+
+    status = feedback_review_statuses(store, manifest_path)[feedback["feedback_id"]]
+
+    assert status.status == "Ineligible"
+    assert status.training_eligibility == "Not eligible"
+
+
+@pytest.mark.parametrize(
+    ("decision", "expected_status"),
+    [("excluded", "Excluded"), ("ambiguous", "Ambiguous")],
+)
+def test_excluded_and_ambiguous_reviews_never_become_training_examples(
+    tmp_path, decision, expected_status
+):
+    store = FeedbackStore(tmp_path / f"{decision}.sqlite3")
+    feedback = _submit(store)
+    manifest_path = tmp_path / f"{decision}.jsonl"
+    entry = _manifest(feedback)
+    entry["review_decision"] = decision
+
+    append_review_entry(store, manifest_path, entry)
+    loaded = load_reviewed_feedback(store, manifest_path)
+
+    assert not loaded.examples
+    status = feedback_review_statuses(store, manifest_path)[feedback["feedback_id"]]
+    assert status.status == expected_status
+    assert status.training_eligibility == "Not eligible"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("training_label", "confirm_alert"),
+        ("snapshot_id", "a-different-snapshot"),
+    ],
+)
+def test_review_submission_rejects_action_labels_and_snapshot_rebinding(
+    tmp_path, field, value
+):
+    store = FeedbackStore(tmp_path / "feedback.sqlite3")
+    feedback = _submit(store)
+    entry = _manifest(feedback)
+    entry[field] = value
+    manifest_path = tmp_path / "review.jsonl"
+
+    with pytest.raises(ValueError):
+        append_review_entry(store, manifest_path, entry)
+    assert not manifest_path.exists()
+
+
+def test_reviewed_training_blocks_insufficient_class_diversity(tmp_path):
+    store = FeedbackStore(tmp_path / "feedback.sqlite3")
+    feedback = _submit(store)
+    manifest_path = _manifest_file(
+        tmp_path / "review.jsonl",
+        _manifest(feedback, label="potential_distress"),
+    )
+    output_directory = tmp_path / "personalized"
+
+    with pytest.raises(ValueError, match="at least 4 per label"):
+        run_reviewed_personalization(store, manifest_path, output_directory)
+    assert not output_directory.exists()
+
+
+def test_reviewed_personalization_uses_only_explicit_reviews_and_versions_artifacts(
+    tmp_path,
+):
+    store = FeedbackStore(tmp_path / "feedback.sqlite3")
+    manifest_path = tmp_path / "review.jsonl"
+    for index in range(8):
+        feedback = _submit(store)
+        label = (
+            "potential_distress"
+            if index < 4
+            else "no_sufficient_distress_evidence"
+        )
+        entry = _manifest(
+            feedback,
+            label=label,
+            evidence_context_reference=f"event-{index}",
+        )
+        append_review_entry(store, manifest_path, entry)
+
+    output_directory = tmp_path / "personalized"
+    first = run_reviewed_personalization(store, manifest_path, output_directory)
+    second = run_reviewed_personalization(store, manifest_path, output_directory)
+
+    assert first.data_mode == "reviewed"
+    assert first.sample_count == 8
+    assert first.class_counts == {
+        "potential_distress": 4,
+        "no_sufficient_distress_evidence": 4,
+    }
+    assert first.held_out_sample_count == 2
+    assert first.artifact_path != second.artifact_path
+    assert first.artifact_path.is_file() and second.artifact_path.is_file()
+    assert first.run_metadata_path.is_file() and second.run_metadata_path.is_file()
+    metadata = json.loads(first.run_metadata_path.read_text(encoding="utf-8"))
+    assert metadata["data_mode"] == "reviewed"
+    assert metadata["live_model_activated"] is False
+
+
+def test_synthetic_personalization_is_deterministic_versioned_and_isolated(tmp_path):
+    output_directory = tmp_path / "private-models"
+
+    first = run_synthetic_personalization_demo(output_directory)
+    second = run_synthetic_personalization_demo(output_directory)
+
+    assert first.data_mode == "DEMO/SYNTHETIC ONLY"
+    assert first.artifact_path != second.artifact_path
+    assert first.artifact_path.is_file() and second.artifact_path.is_file()
+    assert first.run_metadata_path.is_file() and second.run_metadata_path.is_file()
+    assert first.artifact_path.parent.name == "synthetic_demo"
+    assert first.class_counts == second.class_counts
+    assert first.after_metrics == second.after_metrics
+    metadata = json.loads(first.run_metadata_path.read_text(encoding="utf-8"))
+    assert metadata["data_mode"] == "DEMO/SYNTHETIC ONLY"
+    assert metadata["live_model_activated"] is False

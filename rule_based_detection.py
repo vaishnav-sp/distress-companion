@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 import time
 from typing import Any, Mapping
+import uuid
 
 from fusion.schema import FeatureRecord
 
@@ -835,6 +836,7 @@ class RuleBasedInferenceProcessor:
 
     def __init__(self, config: RuleDetectionConfig | None = None) -> None:
         self.detector = RuleBasedCueDetector(config)
+        self._snapshot_namespace = uuid.uuid4()
 
     def reset(self) -> None:
         self.detector.reset()
@@ -843,6 +845,7 @@ class RuleBasedInferenceProcessor:
         from fusion import build_fusion_evidence, evidence_to_feature_record
 
         now = time.monotonic()
+        timestamp_anchor_utc = datetime.now(timezone.utc)
         fresh_snapshot = dict(snapshot)
         modality_timestamps: dict[str, float | None] = {}
         fresh_timestamps: dict[str, float] = {}
@@ -863,10 +866,41 @@ class RuleBasedInferenceProcessor:
                 fresh_timestamps[modality] = numeric_timestamp
             modality_timestamps[modality] = numeric_timestamp
 
+        result_key = "|".join(
+            f"{modality}:{fresh_timestamps.get(modality, 'missing')}"
+            for modality in ("face", "behavior", "audio")
+        )
+        snapshot_id = str(uuid.uuid5(self._snapshot_namespace, result_key))
         evidence = build_fusion_evidence(fresh_snapshot)
         record = evidence_to_feature_record(
             evidence,
             provenance={"source": "live_rule_based_monitoring"},
+        )
+        available_modalities = {
+            modality
+            for modality, available in record.available_modalities.items()
+            if available
+        }
+        record.provenance.update(
+            {
+                "snapshot_id": snapshot_id,
+                "source_timestamp_clock": "monotonic",
+                "source_timestamp_anchor_utc": timestamp_anchor_utc.isoformat(),
+                "source_timestamp_anchor_monotonic": now,
+                "source_timestamps_monotonic": {
+                    modality: fresh_timestamps[modality]
+                    for modality in available_modalities
+                    if modality in fresh_timestamps
+                },
+                "source_timestamps_utc": {
+                    modality: (
+                        timestamp_anchor_utc
+                        + timedelta(seconds=fresh_timestamps[modality] - now)
+                    ).isoformat()
+                    for modality in available_modalities
+                    if modality in fresh_timestamps
+                },
+            }
         )
         behavior_result = fresh_snapshot.get("latest_behavior_result")
         if isinstance(behavior_result, Mapping):
@@ -903,10 +937,6 @@ class RuleBasedInferenceProcessor:
             time.perf_counter() - evaluation_started
         ) * 1000.0
         source_timestamp = max(fresh_timestamps.values(), default=None)
-        result_key = "|".join(
-            f"{modality}:{fresh_timestamps.get(modality, 'missing')}"
-            for modality in ("face", "behavior", "audio")
-        )
         return {
             "inference": inference,
             "feature_record": record,

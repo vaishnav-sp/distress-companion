@@ -110,6 +110,7 @@ class MonitoringManager:
         self.latest_inference_updated_at_utc: str | None = None
         self.latest_inference_error: str | None = None
         self.latest_alert = self.alert_manager.snapshot()
+        self.alert_feature_record: dict[str, Any] | None = None
         self._inference_input_key: tuple[Any, ...] | None = None
         self.inference_history: list[dict[str, Any]] = []
         self._last_history_key: str | None = None
@@ -234,6 +235,7 @@ class MonitoringManager:
                 "latest_inference_updated_at_utc": self.latest_inference_updated_at_utc,
                 "latest_inference_error": self.latest_inference_error,
                 "latest_alert": self.latest_alert,
+                "alert_feature_record": deepcopy(self.alert_feature_record),
                 "inference_history": deepcopy(self.inference_history),
                 "alert_diagnostics": deepcopy(self.alert_diagnostics),
                 "last_error": dict(self.last_error),
@@ -1189,6 +1191,7 @@ class MonitoringManager:
                 inference = result.get("inference")
                 source_timestamp = result.get("source_timestamp")
                 result_key = result.get("result_key")
+                previous_alert = self.latest_alert
                 alert_before = self.alert_manager.diagnostic_state()
                 alert = self.alert_manager.update(
                     inference,
@@ -1241,6 +1244,16 @@ class MonitoringManager:
                     )
                     self.latest_inference_error = result.get("error")
                     self.latest_alert = alert
+                    if (
+                        alert.state == "potential_distress"
+                        and alert.alert_id
+                        and alert.alert_id != previous_alert.alert_id
+                    ):
+                        self.alert_feature_record = {
+                            "alert_id": alert.alert_id,
+                            "alert": deepcopy(alert),
+                            "record": deepcopy(result.get("feature_record")),
+                        }
                     if diagnostic_entry is not None:
                         self.alert_diagnostics.append(diagnostic_entry)
                     key_text = str(result_key) if result_key is not None else None
